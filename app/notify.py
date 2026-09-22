@@ -9,6 +9,8 @@ import logging
 
 import httpx
 
+from datetime import datetime
+
 from app.constants import (
     TELEGRAM_API_BASE,
     TELEGRAM_RETRY_AFTER_DEFAULT,
@@ -20,9 +22,17 @@ from app.tracker import ENDED, WARNING, Event
 log = logging.getLogger(__name__)
 
 _TEXT = {
-    WARNING: "⚠️ Викид у регіоні {region}!\nПочало: {at}",
-    ENDED: "✅ Викид у регіоні {region} завершився.\nЗакінчено: {at}",
+    WARNING: "⚠️ Викид у регіоні {region}!",
+    ENDED: "✅ Викид у регіоні {region} завершився.",
 }
+
+
+def _format_time(iso_time: str) -> str:
+    """Відформатувати ISO-8601 час як HH:MM (MSK)."""
+    dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+    # За замовчуванням в STALCRAFT MSK (UTC+3), але передається UTC
+    msk_dt = dt.replace(tzinfo=None)
+    return msk_dt.strftime("%H:%M")
 
 
 def _format_duration(seconds: float) -> str:
@@ -43,12 +53,25 @@ def format_event(event: Event) -> str:
     """
     template = _TEXT.get(event.kind, "{region}: {kind} {at}")
     text = template.format(region=event.region, at=event.at, kind=event.kind)
-    if event.interval is not None:
-        duration = _format_duration(event.interval)
-        if event.kind == WARNING:
-            text += f"\nЗ попереднього викиду: {duration}"
-        elif event.kind == ENDED:
-            text += f"\nТривав: {duration}"
+
+    if event.kind == WARNING:
+        text += f"\n⏰ Почало: {_format_time(event.at)}"
+        if event.interval is not None:
+            duration = _format_duration(event.interval)
+            text += f"\n⏸️ З попереднього викиду: {duration}"
+        if event.predicted_next:
+            next_time = _format_time(event.predicted_next)
+            text += f"\n📍 Орієнтовно закінчиться: {next_time}"
+
+    elif event.kind == ENDED:
+        text += f"\n⏰ Закінчено: {_format_time(event.at)}"
+        if event.interval is not None:
+            duration = _format_duration(event.interval)
+            text += f"\n⌛ Тривав: {duration}"
+        if event.predicted_next:
+            next_time = _format_time(event.predicted_next)
+            text += f"\n📍 Наступний орієнтовно: {next_time}"
+
     return text
 
 
