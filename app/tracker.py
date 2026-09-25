@@ -38,7 +38,8 @@ def _seconds_between(earlier: str, later: str) -> float:
 def _add_seconds(iso_time: str, seconds: float) -> str:
     """Додати секунди до ISO-8601 часу."""
     from datetime import timedelta
-    dt = datetime.fromisoformat(iso_time) + timedelta(seconds=seconds)
+    # Парсимо без інтерпретації timezone, щоб `isoformat()` не додав `+00:00`
+    dt = datetime.fromisoformat(iso_time.replace("Z", "")) + timedelta(seconds=seconds)
     return dt.isoformat() + "Z"
 
 
