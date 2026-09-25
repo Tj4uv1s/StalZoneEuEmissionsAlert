@@ -9,11 +9,11 @@ import logging
 
 import httpx
 
-from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.constants import (
-    MSK_LABEL,
-    MSK_OFFSET_HOURS,
+    LOCAL_TZ_LABEL,
+    LOCAL_TZ_NAME,
     TELEGRAM_API_BASE,
     TELEGRAM_RETRY_AFTER_DEFAULT,
     TELEGRAM_SEND_METHOD,
@@ -23,7 +23,7 @@ from app.tracker import ENDED, WARNING, Event, parse_iso
 
 log = logging.getLogger(__name__)
 
-_MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
+_LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 
 _TEXT = {
     WARNING: "⚠️ Викид у регіоні {region}!",
@@ -32,11 +32,11 @@ _TEXT = {
 
 
 def _format_time(iso_time: str | None) -> str | None:
-    """Відформатувати ISO-8601 час як `HH:MM МСК`. None, якщо час непридатний."""
+    """Відформатувати ISO-8601 час як `HH:MM за Києвом`. None, якщо непридатний."""
     moment = parse_iso(iso_time)
     if moment is None:
         return None
-    return f"{moment.astimezone(_MSK).strftime('%H:%M')} {MSK_LABEL}"
+    return f"{moment.astimezone(_LOCAL_TZ).strftime('%H:%M')} {LOCAL_TZ_LABEL}"
 
 
 def _format_duration(seconds: float) -> str:
