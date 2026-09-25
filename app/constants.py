@@ -4,6 +4,14 @@
 EVENT_WARNING = "warning"  # викид оголошений або вже йде
 EVENT_ENDED = "ended"      # викид завершився
 
+# Трекер
+HISTORY_LIMIT = 10  # скільки останніх циклів тримаємо для середніх
+DEFAULT_ANNOUNCE_MAX_AGE = 900  # секунди: старіші події не анонсуємо (тихий старт)
+
+# Час у повідомленнях: МСК = UTC+3 (без переходу на літній час з 2014)
+MSK_OFFSET_HOURS = 3
+MSK_LABEL = "МСК"
+
 # Сітьові константи
 DEFAULT_TIMEOUT = 15.0
 RETRY_ATTEMPTS = 2

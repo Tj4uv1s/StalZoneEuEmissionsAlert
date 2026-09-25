@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
+from app.constants import DEFAULT_ANNOUNCE_MAX_AGE
+
 load_dotenv()
 
 
@@ -25,6 +27,11 @@ class Config:
     )
     regions: list[str] = field(default_factory=lambda: _split(os.getenv("REGIONS", "EU")))
     min_poll_interval: float = float(os.getenv("MIN_POLL_INTERVAL", "2"))
+    announce_max_age: float = float(
+        os.getenv("ANNOUNCE_MAX_AGE", str(DEFAULT_ANNOUNCE_MAX_AGE))
+    )
+    """Секунди: подію старіше цього не анонсуємо, тільки записуємо в стан.
+    Дає тихий старт і не дає перезапуску анонсувати активний викид вдруге."""
 
     tg_token: str = os.getenv("TG_TOKEN", "")
     tg_chat_ids: list[str] = field(default_factory=lambda: _split(os.getenv("TG_CHAT_IDS", "")))

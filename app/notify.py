@@ -9,17 +9,21 @@ import logging
 
 import httpx
 
-from datetime import datetime
+from datetime import timedelta, timezone
 
 from app.constants import (
+    MSK_LABEL,
+    MSK_OFFSET_HOURS,
     TELEGRAM_API_BASE,
     TELEGRAM_RETRY_AFTER_DEFAULT,
     TELEGRAM_SEND_METHOD,
 )
 from app.http import default_ssl_context
-from app.tracker import ENDED, WARNING, Event
+from app.tracker import ENDED, WARNING, Event, parse_iso
 
 log = logging.getLogger(__name__)
+
+_MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
 
 _TEXT = {
     WARNING: "⚠️ Викид у регіоні {region}!",
@@ -27,12 +31,12 @@ _TEXT = {
 }
 
 
-def _format_time(iso_time: str) -> str:
-    """Відформатувати ISO-8601 час як HH:MM (MSK)."""
-    dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
-    # За замовчуванням в STALCRAFT MSK (UTC+3), але передається UTC
-    msk_dt = dt.replace(tzinfo=None)
-    return msk_dt.strftime("%H:%M")
+def _format_time(iso_time: str | None) -> str | None:
+    """Відформатувати ISO-8601 час як `HH:MM МСК`. None, якщо час непридатний."""
+    moment = parse_iso(iso_time)
+    if moment is None:
+        return None
+    return f"{moment.astimezone(_MSK).strftime('%H:%M')} {MSK_LABEL}"
 
 
 def _format_duration(seconds: float) -> str:
@@ -45,34 +49,40 @@ def _format_duration(seconds: float) -> str:
 def format_event(event: Event) -> str:
     """Відформатувати подію в текст для Telegram.
 
+    Рядки з непридатним часом просто пропускаються — краще коротше
+    повідомлення, ніж падіння на форматуванні.
+
     Args:
         event: Подія трекера
 
     Returns:
         Відформатований текст повідомлення
     """
-    template = _TEXT.get(event.kind, "{region}: {kind} {at}")
-    text = template.format(region=event.region, at=event.at, kind=event.kind)
-
     if event.kind == WARNING:
-        text += f"\n⏰ Почало: {_format_time(event.at)}"
-        if event.interval is not None:
-            duration = _format_duration(event.interval)
-            text += f"\n⏸️ З попереднього викиду: {duration}"
-        if event.predicted_next:
-            next_time = _format_time(event.predicted_next)
-            text += f"\n📍 Орієнтовно закінчиться: {next_time}"
-
+        at_label, predicted_label = "⏰ Почало", "📍 Орієнтовно закінчиться"
     elif event.kind == ENDED:
-        text += f"\n⏰ Закінчено: {_format_time(event.at)}"
-        if event.interval is not None:
-            duration = _format_duration(event.interval)
-            text += f"\n⌛ Тривав: {duration}"
-        if event.predicted_next:
-            next_time = _format_time(event.predicted_next)
-            text += f"\n📍 Наступний орієнтовно: {next_time}"
+        at_label, predicted_label = "⏰ Закінчено", "📍 Наступний орієнтовно"
+    else:
+        return f"{event.region}: {event.kind} {event.at}"
 
-    return text
+    lines = [_TEXT[event.kind].format(region=event.region)]
+
+    at_time = _format_time(event.at)
+    if at_time:
+        lines.append(f"{at_label}: {at_time}")
+
+    if event.interval is not None:
+        duration = _format_duration(event.interval)
+        if event.kind == WARNING:
+            lines.append(f"⏸️ З попереднього викиду: {duration}")
+        else:
+            lines.append(f"⌛ Тривав: {duration}")
+
+    predicted_time = _format_time(event.predicted_next)
+    if predicted_time:
+        lines.append(f"{predicted_label}: {predicted_time}")
+
+    return "\n".join(lines)
 
 
 class Notifier:

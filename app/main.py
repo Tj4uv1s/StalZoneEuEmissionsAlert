@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from app.config import config
 from app.constants import RATE_LIMIT_SAFETY_MARGIN
@@ -69,13 +70,23 @@ async def poll_once(api: StalcraftClient, storage: JsonStorage, notifier: Notifi
 
         log.info("%s: викид — %s", region, "ЙДЕ" if response.get("currentStart") else "немає")
 
-        events, new_state = diff(region, storage.get(region), response)
-        for event in events:
-            text = format_event(event)
-            log.info("%s: подія -> %r", region, text)
-            await notifier.broadcast(text)
-        if new_state != storage.get(region):
-            storage.set(region, new_state)
+        try:
+            events, new_state = diff(
+                region,
+                storage.get(region),
+                response,
+                datetime.now(timezone.utc),
+                config.announce_max_age,
+            )
+            for event in events:
+                text = format_event(event)
+                log.info("%s: подія -> %r", region, text)
+                await notifier.broadcast(text)
+            if new_state != storage.get(region):
+                storage.set(region, new_state)
+        except Exception:
+            # Один кривий регіон не має валити цикл по всіх інших
+            log.exception("%s: помилка обробки події", region)
 
         delay = max(delay, _next_delay(rate, config.min_poll_interval))
 
@@ -92,9 +103,10 @@ async def main() -> None:
         config.api_base, config.api_client_id, config.api_client_secret
     ) as api:
         log.info(
-            "Старт. Регіони: %s; пол інтервалу: %ss; API: %s",
+            "Старт. Регіони: %s; пол інтервалу: %ss; анонсуємо події не старше %s хв; API: %s",
             ", ".join(config.regions),
             config.min_poll_interval,
+            int(config.announce_max_age // 60),
             config.api_base,
         )
         try:
