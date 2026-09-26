@@ -12,10 +12,10 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from app.auction import top_sales_since
+from app.auction import top_listings_between
 from app.config import config
 from app.constants import RATE_LIMIT_SAFETY_MARGIN
-from app.notify import Notifier, format_event, format_top_sales
+from app.notify import Notifier, format_event, format_top_listings
 from app.stalcraft import RateLimit, StalcraftClient
 from app.single_instance import AlreadyRunning, SingleInstance
 from app.storage import JsonStorage
@@ -51,15 +51,17 @@ def _next_delay(rate: RateLimit, floor: float) -> float:
     return max(floor, window_left / rate.remaining)
 
 
-async def _handle_top_sales(
+async def _handle_top_listings(
     region: str, state: dict, notifier: Notifier, api: StalcraftClient, now: datetime
 ) -> None:
-    """Якщо надійшов час забирати топ продажів для region — забрати й розіслати.
+    """Якщо надійшов час — зібрати й розіслати топ виставлених на аукціон артефактів.
 
-    Мутує `state` на місці (прибирає "pending_top_sales", коли обробили).
-    Виклик top_sales_since може забрати десятки секунд (перебирає весь
-    каталог артефактів) — і саме тому робимо це рідко, раз на викид, а не
-    на кожному опитуванні.
+    Мутує `state` на місці (прибирає "pending_top_lots", коли обробили).
+    Збір перебирає весь каталог артефактів і може забрати десятки секунд —
+    тому робимо це рідко, раз на викид, а не на кожному опитуванні.
+
+    Вікно — рівно [кінець викиду, due], а не до `now`: якщо бот перевірив
+    трохи пізніше (пауза опитування, рестарт), вікно від цього не розповзається.
 
     Args:
         region: Код регіону
@@ -68,7 +70,7 @@ async def _handle_top_sales(
         api: Клієнт API
         now: Поточний час
     """
-    pending = state.get("pending_top_sales")
+    pending = state.get("pending_top_lots")
     if not pending:
         return
 
@@ -76,19 +78,19 @@ async def _handle_top_sales(
     since = parse_iso(pending.get("since"))
     if due is None or since is None:
         # Кривий запис у стані (наприклад, ручне редагування) — не зациклюємось
-        state.pop("pending_top_sales", None)
+        state.pop("pending_top_lots", None)
         return
     if now < due:
         return
 
-    sales = await top_sales_since(api, region, since)
-    text = format_top_sales(region, sales, since, now)
+    listings = await top_listings_between(api, region, since, due)
+    text = format_top_listings(region, listings, since, due)
     if text:
-        log.info("%s: топ продажів -> %r", region, text)
+        log.info("%s: топ лотів -> %r", region, text)
         await notifier.broadcast(text)
     else:
-        log.info("%s: за викид ніхто не продав артефактів — мовчимо", region)
-    state.pop("pending_top_sales", None)
+        log.info("%s: після викиду артефактів на аукціон не виставляли — мовчимо", region)
+    state.pop("pending_top_lots", None)
 
 
 async def poll_once(
@@ -125,10 +127,10 @@ async def poll_once(
                 log.info("%s: подія -> %r", region, text)
                 await notifier.broadcast(text)
                 if event.kind == ENDED:
-                    due = parse_iso(event.at) + timedelta(seconds=config.top_sales_delay)
-                    new_state["pending_top_sales"] = {"since": event.at, "due": to_iso(due)}
+                    due = parse_iso(event.at) + timedelta(seconds=config.top_lots_delay)
+                    new_state["pending_top_lots"] = {"since": event.at, "due": to_iso(due)}
 
-            await _handle_top_sales(region, new_state, notifier, api, now)
+            await _handle_top_listings(region, new_state, notifier, api, now)
 
             if new_state != state:
                 storage.set(region, new_state)
@@ -158,11 +160,11 @@ async def _run() -> None:
     ) as api:
         log.info(
             "Старт. Регіони: %s; пол інтервалу: %ss; анонсуємо події не старше %s хв; "
-            "топ продажів через %s хв після викиду; API: %s",
+            "топ лотів аукціону через %s хв після викиду; API: %s",
             ", ".join(config.regions),
             config.min_poll_interval,
             int(config.announce_max_age // 60),
-            int(config.top_sales_delay // 60),
+            int(config.top_lots_delay // 60),
             config.api_base,
         )
         try:

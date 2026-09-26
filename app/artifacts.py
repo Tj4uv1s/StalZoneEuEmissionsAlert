@@ -3,6 +3,7 @@
 Мережі тут немає — каталог зберігається як файл у репозиторії (artifacts_catalog.json),
 зібраний одноразовим переглядом https://github.com/EXBO-Studio/stalzone-database.
 API гри не дає списку артефактів напряму — тільки цю зовнішню базу предметів.
+Назви російською: українського перекладу в грі немає.
 Оновлювати вручну, коли в грі з'являються нові артефакти.
 """
 from __future__ import annotations
@@ -10,8 +11,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-
-from app.constants import ARTIFACT_CATEGORY_EMOJI, ARTIFACT_CATEGORY_LABEL
 
 _CATALOG_PATH = Path(__file__).parent / "artifacts_catalog.json"
 
@@ -23,16 +22,6 @@ class Artifact:
     id: str
     name: str
     category: str
-
-    @property
-    def emoji(self) -> str:
-        """Емодзі категорії. '❔', якщо категорія невідома (нова, без оновлення каталогу)."""
-        return ARTIFACT_CATEGORY_EMOJI.get(self.category, "❔")
-
-    @property
-    def category_label(self) -> str:
-        """Підпис категорії українською. Сама назва category, якщо підпису немає."""
-        return ARTIFACT_CATEGORY_LABEL.get(self.category, self.category)
 
 
 def load_catalog(path: Path = _CATALOG_PATH) -> tuple[Artifact, ...]:

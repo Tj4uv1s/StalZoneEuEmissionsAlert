@@ -12,13 +12,15 @@ import httpx
 
 from zoneinfo import ZoneInfo
 
-from app.auction import Sale
+from app.auction import Listing
 from app.constants import (
+    ARTIFACT_QUALITY,
     LOCAL_TZ_LABEL,
     LOCAL_TZ_NAME,
     TELEGRAM_API_BASE,
     TELEGRAM_RETRY_AFTER_DEFAULT,
     TELEGRAM_SEND_METHOD,
+    UNKNOWN_QUALITY,
 )
 from app.http import default_ssl_context
 from app.tracker import ENDED, WARNING, Event, parse_iso
@@ -35,15 +37,15 @@ _TEXT = {
 _MEDALS = ("🥇", "🥈", "🥉")
 
 
-def _format_dt(moment: datetime) -> str:
-    """Відформатувати datetime як `HH:MM за Києвом`."""
-    return f"{moment.astimezone(_LOCAL_TZ).strftime('%H:%M')} {LOCAL_TZ_LABEL}"
+def _clock(moment: datetime) -> str:
+    """Київський час як `HH:MM`, без підпису."""
+    return moment.astimezone(_LOCAL_TZ).strftime("%H:%M")
 
 
 def _format_time(iso_time: str | None) -> str | None:
     """Відформатувати ISO-8601 час як `HH:MM за Києвом`. None, якщо непридатний."""
     moment = parse_iso(iso_time)
-    return _format_dt(moment) if moment else None
+    return f"{_clock(moment)} {LOCAL_TZ_LABEL}" if moment else None
 
 
 def _format_price(price: int) -> str:
@@ -97,37 +99,36 @@ def format_event(event: Event) -> str:
     return "\n".join(lines)
 
 
-def format_top_sales(
-    region: str, sales: list[Sale], since: datetime, until: datetime
+def format_top_listings(
+    region: str, listings: list[Listing], since: datetime, until: datetime
 ) -> str | None:
-    """Відформатувати топ проданих артефактів у текст для Telegram.
+    """Відформатувати топ виставлених на аукціон артефактів у текст для Telegram.
 
-    Немає власної "рідкості" в історії продажів (API її не віддає, тільки
-    ціну й час) — забарвлюємо повідомлення емодзі категорії артефакту
-    замість рідкості.
+    Колір рядка — рідкість лота (qlt): Telegram не вміє фарбувати текст,
+    тому колір передаємо кружечком-емодзі.
 
     Args:
         region: Код регіону
-        sales: Продажі, відсортовані за спаданням ціни (top_sales_since)
-        since: Початок вікна, за яке рахували статистику
+        listings: Лоти, відсортовані за спаданням ціни (top_listings_between)
+        since: Початок вікна (кінець викиду)
         until: Кінець вікна
 
     Returns:
-        Текст повідомлення, або None, якщо продажів не було (тоді нема про що писати)
+        Текст повідомлення, або None, якщо нічого не виставили (тоді нема про що писати)
     """
-    if not sales:
+    if not listings:
         return None
 
     lines = [
-        f"📊 Топ-{len(sales)} проданих артефактів у регіоні {region}",
-        f"За {_format_dt(since)} — {_format_dt(until)}",
+        f"📦 Топ-{len(listings)} артефактів, виставлених на аукціон у регіоні {region}",
+        f"🕒 {_clock(since)}–{_clock(until)} {LOCAL_TZ_LABEL}",
         "",
     ]
-    for index, sale in enumerate(sales):
+    for index, listing in enumerate(listings):
         rank = _MEDALS[index] if index < len(_MEDALS) else f"{index + 1}."
-        lines.append(
-            f"{rank} {sale.artifact.emoji} {sale.artifact.name} — {_format_price(sale.price)}"
-        )
+        color, label = ARTIFACT_QUALITY.get(listing.quality, UNKNOWN_QUALITY)
+        name = f"{listing.artifact.name} · {label}" if label else listing.artifact.name
+        lines.append(f"{rank} {color} {name} — {_format_price(listing.price)}")
 
     return "\n".join(lines)
 

@@ -124,7 +124,7 @@ class StalcraftClient:
         """
         return await self._get(f"/{region}/emission", None, retries)
 
-    async def get_auction_history(
+    async def get_auction_lots(
         self,
         region: str,
         item_id: str,
@@ -133,24 +133,31 @@ class StalcraftClient:
         offset: int = 0,
         retries: int = RETRY_ATTEMPTS,
     ) -> tuple[dict, RateLimit]:
-        """Отримати історію продажів предмета на аукціоні.
+        """Отримати активні лоти предмета, найновіші перші.
 
-        GET /{region}/auction/{item}/history -> ({total, prices: [...]}, RateLimit)
+        GET /{region}/auction/{item}/lots -> ({total, lots: [...]}, RateLimit)
 
-        Записи відсортовані за спаданням часу покупки (найновіші перші).
+        Завжди з additional=true: тільки там є `qlt` (рідкість) — в історії
+        продажів її немає зовсім.
 
         Args:
             region: Код регіону
             item_id: Ідентифікатор предмета (з каталогу артефактів)
-            limit: Скільки записів повернути, максимум 200
-            offset: Скільки записів пропустити з початку
+            limit: Скільки лотів повернути, максимум 200
+            offset: Скільки лотів пропустити з початку
             retries: Кількість спроб повтору
 
         Returns:
             (response_dict, RateLimit): Дані від API та інформація про rate limit
         """
-        params = {"limit": limit, "offset": offset}
-        return await self._get(f"/{region}/auction/{item_id}/history", params, retries)
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "sort": "time_created",
+            "order": "desc",
+            "additional": "true",
+        }
+        return await self._get(f"/{region}/auction/{item_id}/lots", params, retries)
 
     async def aclose(self) -> None:
         """Закрити HTTP-клієнт."""
