@@ -16,6 +16,7 @@ from app.config import config
 from app.constants import RATE_LIMIT_SAFETY_MARGIN
 from app.notify import Notifier, format_event
 from app.stalcraft import RateLimit, StalcraftClient
+from app.single_instance import AlreadyRunning, SingleInstance
 from app.storage import JsonStorage
 from app.tracker import diff
 
@@ -97,6 +98,12 @@ async def main() -> None:
     """Головна функція."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config.require()
+    with SingleInstance(config.lock_path):
+        await _run()
+
+
+async def _run() -> None:
+    """Цикл опитування. Викликається, коли ми вже єдиний екземпляр."""
     storage = JsonStorage(config.state_path)
     notifier = Notifier(config.tg_token, config.tg_chat_ids)
     async with StalcraftClient(
@@ -120,5 +127,8 @@ async def main() -> None:
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+    except AlreadyRunning as exc:
+        log.error("%s", exc)
+        raise SystemExit(1) from exc
     except KeyboardInterrupt:
         print("\nЗупинено.")

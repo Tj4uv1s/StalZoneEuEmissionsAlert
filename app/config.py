@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -37,6 +38,11 @@ class Config:
     tg_chat_ids: list[str] = field(default_factory=lambda: _split(os.getenv("TG_CHAT_IDS", "")))
 
     state_path: str = os.getenv("STATE_PATH", "data/state.json")
+
+    @property
+    def lock_path(self) -> str:
+        """Лок-файл поруч зі станом: один екземпляр на один STATE_PATH."""
+        return str(Path(self.state_path).with_suffix(".lock"))
 
     def require(self) -> None:
         """Перевірити, що критичні параметри задані."""
