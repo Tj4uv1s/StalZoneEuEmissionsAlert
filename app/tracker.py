@@ -63,8 +63,12 @@ def parse_iso(iso_time: Optional[str]) -> Optional[datetime]:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _to_iso(moment: datetime) -> str:
-    """Записати datetime як ISO-8601 в UTC із суфіксом Z."""
+def to_iso(moment: datetime) -> str:
+    """Записати datetime як ISO-8601 в UTC із суфіксом Z.
+
+    Публічна (не тільки для diff): main.py теж рахує майбутні моменти часу
+    (коли забирати статистику продажів) і повинен записувати їх так само.
+    """
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -87,7 +91,7 @@ def _shift(iso_time: str, seconds: float) -> Optional[str]:
     base = parse_iso(iso_time)
     if base is None:
         return None
-    return _to_iso(base + timedelta(seconds=seconds))
+    return to_iso(base + timedelta(seconds=seconds))
 
 
 def _is_fresh(iso_time: Optional[str], now: datetime, max_age: float) -> bool:

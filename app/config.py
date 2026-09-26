@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.constants import DEFAULT_ANNOUNCE_MAX_AGE
+from app.constants import DEFAULT_ANNOUNCE_MAX_AGE, DEFAULT_TOP_SALES_DELAY
 
 load_dotenv()
 
@@ -33,6 +33,12 @@ class Config:
     )
     """Секунди: подію старіше цього не анонсуємо, тільки записуємо в стан.
     Дає тихий старт і не дає перезапуску анонсувати активний викид вдруге."""
+
+    top_sales_delay: float = float(
+        os.getenv("TOP_SALES_DELAY", str(DEFAULT_TOP_SALES_DELAY))
+    )
+    """Секунди після кінця викиду, коли рахуємо топ проданих артефактів
+    (час на активний збір і продаж)."""
 
     tg_token: str = os.getenv("TG_TOKEN", "")
     tg_chat_ids: list[str] = field(default_factory=lambda: _split(os.getenv("TG_CHAT_IDS", "")))

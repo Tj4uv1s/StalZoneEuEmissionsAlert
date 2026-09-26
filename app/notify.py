@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 
 import httpx
 
 from zoneinfo import ZoneInfo
 
+from app.auction import Sale
 from app.constants import (
     LOCAL_TZ_LABEL,
     LOCAL_TZ_NAME,
@@ -30,13 +32,23 @@ _TEXT = {
     ENDED: "✅ Викид у регіоні {region} завершився.",
 }
 
+_MEDALS = ("🥇", "🥈", "🥉")
+
+
+def _format_dt(moment: datetime) -> str:
+    """Відформатувати datetime як `HH:MM за Києвом`."""
+    return f"{moment.astimezone(_LOCAL_TZ).strftime('%H:%M')} {LOCAL_TZ_LABEL}"
+
 
 def _format_time(iso_time: str | None) -> str | None:
     """Відформатувати ISO-8601 час як `HH:MM за Києвом`. None, якщо непридатний."""
     moment = parse_iso(iso_time)
-    if moment is None:
-        return None
-    return f"{moment.astimezone(_LOCAL_TZ).strftime('%H:%M')} {LOCAL_TZ_LABEL}"
+    return _format_dt(moment) if moment else None
+
+
+def _format_price(price: int) -> str:
+    """Відформатувати ціну з розділювачем розрядів: 1500000 -> '1 500 000'."""
+    return f"{price:,}".replace(",", " ")
 
 
 def _format_duration(seconds: float) -> str:
@@ -81,6 +93,41 @@ def format_event(event: Event) -> str:
     predicted_time = _format_time(event.predicted_next)
     if predicted_time:
         lines.append(f"{predicted_label}: {predicted_time}")
+
+    return "\n".join(lines)
+
+
+def format_top_sales(
+    region: str, sales: list[Sale], since: datetime, until: datetime
+) -> str | None:
+    """Відформатувати топ проданих артефактів у текст для Telegram.
+
+    Немає власної "рідкості" в історії продажів (API її не віддає, тільки
+    ціну й час) — забарвлюємо повідомлення емодзі категорії артефакту
+    замість рідкості.
+
+    Args:
+        region: Код регіону
+        sales: Продажі, відсортовані за спаданням ціни (top_sales_since)
+        since: Початок вікна, за яке рахували статистику
+        until: Кінець вікна
+
+    Returns:
+        Текст повідомлення, або None, якщо продажів не було (тоді нема про що писати)
+    """
+    if not sales:
+        return None
+
+    lines = [
+        f"📊 Топ-{len(sales)} проданих артефактів у регіоні {region}",
+        f"За {_format_dt(since)} — {_format_dt(until)}",
+        "",
+    ]
+    for index, sale in enumerate(sales):
+        rank = _MEDALS[index] if index < len(_MEDALS) else f"{index + 1}."
+        lines.append(
+            f"{rank} {sale.artifact.emoji} {sale.artifact.name} — {_format_price(sale.price)}"
+        )
 
     return "\n".join(lines)
 

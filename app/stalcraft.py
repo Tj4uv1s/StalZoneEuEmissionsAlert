@@ -66,19 +66,18 @@ class StalcraftClient:
             verify=default_ssl_context(),
         )
 
-    async def get_emission(
-        self, region: str, retries: int = RETRY_ATTEMPTS
+    async def _get(
+        self, path: str, params: dict | None, retries: int
     ) -> tuple[dict, RateLimit]:
-        """Отримати дані про викид у регіоні.
-
-        GET /{region}/emission -> ({currentStart?, previousStart?, previousEnd?}, RateLimit)
+        """Спільна логіка запиту й повтору для всіх ендпоінтів клієнта.
 
         Повторюємо тільки те, що має сенс повторювати: мережеві обриви, 5xx і 429
         (з уважністю до Retry-After). На 4xx (неправильний токен, помилка в регіоні
         тощо) падаємо одразу — повтор не допоможе.
 
         Args:
-            region: Код регіону (EU, RU, NA, SEA, NEA)
+            path: Шлях запиту (з провідним /)
+            params: Query-параметри або None
             retries: Кількість спроб повтору
 
         Returns:
@@ -86,7 +85,7 @@ class StalcraftClient:
         """
         for attempt in range(retries + 1):
             try:
-                resp = await self._client.get(f"/{region}/emission")
+                resp = await self._client.get(path, params=params)
             except httpx.HTTPError:
                 if attempt == retries:
                     raise
@@ -108,6 +107,50 @@ class StalcraftClient:
             return resp.json(), RateLimit.from_headers(resp.headers)
 
         raise RuntimeError("unreachable")
+
+    async def get_emission(
+        self, region: str, retries: int = RETRY_ATTEMPTS
+    ) -> tuple[dict, RateLimit]:
+        """Отримати дані про викид у регіоні.
+
+        GET /{region}/emission -> ({currentStart?, previousStart?, previousEnd?}, RateLimit)
+
+        Args:
+            region: Код регіону (EU, RU, NA, SEA, NEA)
+            retries: Кількість спроб повтору
+
+        Returns:
+            (response_dict, RateLimit): Дані від API та інформація про rate limit
+        """
+        return await self._get(f"/{region}/emission", None, retries)
+
+    async def get_auction_history(
+        self,
+        region: str,
+        item_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        retries: int = RETRY_ATTEMPTS,
+    ) -> tuple[dict, RateLimit]:
+        """Отримати історію продажів предмета на аукціоні.
+
+        GET /{region}/auction/{item}/history -> ({total, prices: [...]}, RateLimit)
+
+        Записи відсортовані за спаданням часу покупки (найновіші перші).
+
+        Args:
+            region: Код регіону
+            item_id: Ідентифікатор предмета (з каталогу артефактів)
+            limit: Скільки записів повернути, максимум 200
+            offset: Скільки записів пропустити з початку
+            retries: Кількість спроб повтору
+
+        Returns:
+            (response_dict, RateLimit): Дані від API та інформація про rate limit
+        """
+        params = {"limit": limit, "offset": offset}
+        return await self._get(f"/{region}/auction/{item_id}/history", params, retries)
 
     async def aclose(self) -> None:
         """Закрити HTTP-клієнт."""

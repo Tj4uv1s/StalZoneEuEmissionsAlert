@@ -25,3 +25,27 @@ RATE_LIMIT_SAFETY_MARGIN = 0.8  # використовуємо не більше
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_SEND_METHOD = "sendMessage"
 TELEGRAM_RETRY_AFTER_DEFAULT = 3  # секунди
+
+# Топ продажів артефактів після викиду
+DEFAULT_TOP_SALES_DELAY = 1800  # секунди після ENDED: 30 хв на активний збір і продаж
+TOP_SALES_COUNT = 10
+AUCTION_PAGE_SIZE = 200  # максимум за раз, як задокументовано в API
+AUCTION_MAX_PAGES = 3    # запобіжник: не більше 600 записів на один артефакт за прогін
+
+# category з бази EXBO-Studio/stalzone-database -> емодзі й підпис для повідомлень.
+# Немає власної "рідкості" в історії продажів (API її не віддає) — категорія артефакту
+# єдине, чим можна візуально розрізнити повідомлення, тому забарвлюємо саме нею.
+ARTIFACT_CATEGORY_EMOJI = {
+    "gravity": "🌀",
+    "thermal": "🔥",
+    "biochemical": "🧬",
+    "electrophysical": "⚡",
+    "other_arts": "💠",
+}
+ARTIFACT_CATEGORY_LABEL = {
+    "gravity": "гравітаційний",
+    "thermal": "термальний",
+    "biochemical": "біохімічний",
+    "electrophysical": "електрофізичний",
+    "other_arts": "інший",
+}
