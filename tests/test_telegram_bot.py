@@ -9,12 +9,20 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, GetMe, SendMessage
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageText,
+    GetMe,
+    SendMessage,
+    SetMyCommands,
+    SetMyDescription,
+    SetMyShortDescription,
+)
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
 from app.artifacts import Artifact
 from app.constants import MARKET_MIN_LOTS
-from app.telegram_bot import build_router
+from app.telegram_bot import build_router, configure_profile
 
 SOLID = MARKET_MIN_LOTS + 5
 NOW = datetime(2026, 9, 28, 17, 0, tzinfo=timezone.utc)
@@ -178,6 +186,36 @@ async def test_bot_stays_silent_in_groups():
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_is_not_treated_as_search():
+async def test_help_command():
+    session = await _feed(_message("/help"))
+    [sent] = session.of(SendMessage)
+    assert sent.text.startswith("<b>📊 Бот ринку артефактів STALCRAFT</b>")
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_gets_help_not_silence():
+    """Мовчання на незнайому команду виглядає як "бот не працює"."""
     session = await _feed(_message("/help_me"))
-    assert session.of(SendMessage) == []
+    [sent] = session.of(SendMessage)
+    assert "/market" in sent.text
+    assert "🔎" not in sent.text  # не сприйнято як пошук артефакту
+
+
+@pytest.mark.asyncio
+async def test_profile_registers_commands_and_description():
+    session = RecordingSession()
+    await configure_profile(Bot("1:TEST", session=session))
+
+    [commands] = session.of(SetMyCommands)
+    assert [c.command for c in commands.commands] == ["market", "help", "start"]
+    assert commands.scope.type == "all_private_chats"
+    assert session.of(SetMyDescription) and session.of(SetMyShortDescription)
+
+
+@pytest.mark.asyncio
+async def test_profile_failure_is_not_fatal():
+    class FailingSession(RecordingSession):
+        async def make_request(self, bot, method, timeout=None):
+            raise TelegramBadRequest(method=method, message="Bad Request: boom")
+
+    await configure_profile(Bot("1:TEST", session=FailingSession()))  # не кидає

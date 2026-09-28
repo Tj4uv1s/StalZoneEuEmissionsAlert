@@ -13,7 +13,7 @@ callback_data (ліміт Telegram — 64 байти):
     s:EU:0      продати         p:EU:0    прайс, сторінка 0
     r:EU        вибір рідкості  q:EU:3:0  рідкість 3, сторінка 0
     f:EU        підказка пошуку a:EU:id   картка артефакту
-    noop        лічильник сторінок (нічого не робить)
+    h:EU        довідка         noop      лічильник сторінок (нічого не робить)
 """
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def menu(data: Optional[MarketData], region: str, regions: list[str]) -> View:
     keyboard = [
         [(f"💰 Купити ({len(buys)})", f"b:{region}:0"), (f"📤 Продати ({len(sells)})", f"s:{region}:0")],
         [("📋 Прайс", f"p:{region}:0"), ("🎨 За рідкістю", f"r:{region}")],
-        [("🔍 Пошук артефакту", f"f:{region}")],
+        [("🔍 Пошук артефакту", f"f:{region}"), ("❓ Довідка", f"h:{region}")],
         *region_row,
     ]
     return View(text, keyboard)
@@ -290,6 +290,25 @@ def rarity_list(
     )
 
 
+def help_view(region: str) -> View:
+    """Довідка: що вміє бот і як читати сигнали."""
+    return View(
+        "<b>📊 Бот ринку артефактів STALCRAFT</b>\n\n"
+        "<b>Що вміє</b>\n"
+        "• /market — меню ринку: що вигідно купити й продати, прайс, рідкості\n"
+        "• Надішліть назву артефакту (можна частину, наприклад <i>призма</i>) — "
+        "картка з цінами за всіма рідкостями\n"
+        "• /help — ця довідка\n\n"
+        "<b>Як читати сигнали</b>\n"
+        f"💰 вигідно купити — зараз дешевше звичної ціни на {MARKET_SIGNAL_PCT:g}%+\n"
+        f"📤 вигідно продати — зараз дорожче звичної ціни на {MARKET_SIGNAL_PCT:g}%+\n"
+        f"Звична ціна — середня за {MARKET_BASELINE_DAYS} днів. Ціни — медіана "
+        "виставлених на аукціон лотів; оновлюються щодня з дайджестом.\n\n"
+        "Сповіщення про викиди й топ лотів після викиду — у каналі.",
+        [[("📊 Відкрити меню ринку", f"m:{region}")]],
+    )
+
+
 def search_prompt(region: str) -> View:
     return View(
         "<b>🔍 Пошук артефакту</b>\n\n"
@@ -387,6 +406,8 @@ def render_callback(
             return menu(data, region, regions)
         if action == "f":
             return search_prompt(region)
+        if action == "h":
+            return help_view(region)
         if action == "a" and args:
             artifact = next((a for a in catalog if a.id == args[0]), None)
             return artifact_card(data, artifact, region) if artifact else None

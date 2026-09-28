@@ -71,7 +71,7 @@ def test_menu_shows_signal_counts_and_sections():
     view = views.menu(data(), "EU", ["EU"])
     assert "💰 Вигідно купити: <b>1</b>" in view.text
     assert "📤 Вигідно продати: <b>1</b>" in view.text
-    assert buttons(view) == ["b:EU:0", "s:EU:0", "p:EU:0", "r:EU", "f:EU"]
+    assert buttons(view) == ["b:EU:0", "s:EU:0", "p:EU:0", "r:EU", "f:EU", "h:EU"]
 
 
 def test_menu_has_region_switch_only_with_several_regions():
@@ -222,6 +222,7 @@ def get_state(region):
         ("r:EU", "<b>🎨 За рідкістю</b>"),
         ("q:EU:2:0", "<b>🔵 Особый</b>"),
         ("f:EU", "<b>🔍 Пошук артефакту</b>"),
+        ("h:EU", "<b>📊 Бот ринку артефактів STALCRAFT</b>"),
         ("a:EU:prism", "<b>🔎 Призма</b>"),
     ],
 )
@@ -279,3 +280,10 @@ def test_keyboard_to_markup():
         [("⬅ Меню", "m:EU")],
     ]
     assert to_markup([]) is None
+
+
+def test_help_explains_commands_and_signals():
+    view = views.help_view("EU")
+    for needle in ("/market", "/help", "призма", "💰 вигідно купити", "📤 вигідно продати"):
+        assert needle in view.text
+    assert buttons(view) == ["m:EU"]

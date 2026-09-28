@@ -17,9 +17,16 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatType, ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app import views
 from app.artifacts import CATALOG, Artifact
@@ -106,10 +113,19 @@ def build_router(
         region = region_for(message.from_user.id)
         await send(message, views.menu(data_for(region), region, regions))
 
+    @router.message(Command("help"))
+    async def on_help(message: Message) -> None:
+        await send(message, views.help_view(region_for(message.from_user.id)))
+
     @router.message(F.text, ~F.text.startswith("/"))
     async def on_text(message: Message) -> None:
         region = region_for(message.from_user.id)
         await send(message, views.search(data_for(region), message.text, region, catalog))
+
+    @router.message(F.text.startswith("/"))
+    async def on_unknown_command(message: Message) -> None:
+        # Мовчання на незнайому команду виглядає як "бот не працює" — краще довідка
+        await send(message, views.help_view(region_for(message.from_user.id)))
 
     @router.callback_query()
     async def on_button(callback: CallbackQuery) -> None:
@@ -130,6 +146,33 @@ def build_router(
     return router
 
 
+COMMANDS = [
+    BotCommand(command="market", description="Меню ринку: купити, продати, прайс"),
+    BotCommand(command="help", description="Що вміє бот і як читати сигнали"),
+    BotCommand(command="start", description="Почати"),
+]
+DESCRIPTION = (
+    "Аналітика ринку артефактів STALCRAFT: що зараз вигідно купити й продати, "
+    "прайс за рідкостями й пошук артефакту. Натисніть «Почати» або /help."
+)
+SHORT_DESCRIPTION = "Що вигідно купити й продати на аукціоні STALCRAFT"
+
+
+async def configure_profile(bot: Bot) -> None:
+    """Зареєструвати в Telegram список команд і опис бота.
+
+    Без цього кнопка "/" у клієнті нічого не підказує, а порожній чат з
+    ботом не пояснює, що він уміє. Виклики ідемпотентні — безпечно робити на
+    кожному старті. Збій не критичний: меню працює й без цього.
+    """
+    try:
+        await bot.set_my_commands(COMMANDS, scope=BotCommandScopeAllPrivateChats())
+        await bot.set_my_description(DESCRIPTION)
+        await bot.set_my_short_description(SHORT_DESCRIPTION)
+    except TelegramAPIError:
+        log.warning("не вдалося зареєструвати команди/опис бота", exc_info=True)
+
+
 async def run_menu(token: str, get_state: Callable[[str], dict], regions: list[str]) -> None:
     """Слухати оновлення Telegram, поки процес живий.
 
@@ -140,6 +183,8 @@ async def run_menu(token: str, get_state: Callable[[str], dict], regions: list[s
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(get_state, regions))
     try:
+        await configure_profile(bot)
+        log.info("меню бота слухає особисті повідомлення (/start, /market, /help)")
         await dispatcher.start_polling(bot, handle_signals=False)
     except Exception:
         log.exception("меню бота впало — сповіщення в канал працюють далі")
