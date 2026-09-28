@@ -1,39 +1,43 @@
-"""Відправлення повідомлень у Telegram прямо через Bot API (без фреймворку).
+"""Повідомлення в Telegram: форматування постів каналу й відправлення через Bot API.
 
-Фреймворк (aiogram) додамо пізніше, коли з'являться команди від користувачів.
+Відправлення в канал — прямо через Bot API (httpx). Інтерактивне меню в
+особистих повідомленнях живе окремо, в app/telegram_bot.py (aiogram).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime
+from typing import Optional
 
 import httpx
-
-from zoneinfo import ZoneInfo
 
 from app.artifacts import CATALOG, Artifact
 from app.auction import Listing
 from app.constants import (
-    ARTIFACT_QUALITY,
+    CHANNEL_SIGNALS_COUNT,
+    DEEP_LINK_PREFIX,
     LOCAL_TZ_LABEL,
-    LOCAL_TZ_NAME,
-    MARKET_MIN_CHANGE_PCT,
+    MARKET_BASELINE_DAYS,
     MARKET_MIN_LOTS,
+    MARKET_SIGNAL_PCT,
     TELEGRAM_API_BASE,
-    TELEGRAM_MESSAGE_LIMIT,
     TELEGRAM_RETRY_AFTER_DEFAULT,
     TELEGRAM_SEND_METHOD,
-    TOP_MOVERS_COUNT,
-    UNKNOWN_QUALITY,
+)
+from app.formatting import (
+    LOCAL_TZ,
+    clock,
+    format_compact,
+    format_pct,
+    format_price,
+    quality_title,
 )
 from app.http import default_ssl_context
-from app.market import PriceChange, compare, split_key, top_movers
+from app.market import Quote, quotes, signals
 from app.tracker import ENDED, WARNING, Event, parse_iso
 
 log = logging.getLogger(__name__)
-
-_LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 
 _TEXT = {
     WARNING: "⚠️ Викид у регіоні {region}!",
@@ -42,66 +46,13 @@ _TEXT = {
 
 _MEDALS = ("🥇", "🥈", "🥉")
 
-
-def _clock(moment: datetime) -> str:
-    """Київський час як `HH:MM`, без підпису."""
-    return moment.astimezone(_LOCAL_TZ).strftime("%H:%M")
+Button = tuple[str, str]  # (текст, url)
 
 
 def _format_time(iso_time: str | None) -> str | None:
     """Відформатувати ISO-8601 час як `HH:MM за Києвом`. None, якщо непридатний."""
     moment = parse_iso(iso_time)
-    return f"{_clock(moment)} {LOCAL_TZ_LABEL}" if moment else None
-
-
-def _format_price(price: int) -> str:
-    """Відформатувати ціну з розділювачем розрядів: 1500000 -> '1 500 000'."""
-    return f"{price:,}".replace(",", " ")
-
-
-_COMPACT_UNITS = ((1_000_000_000, "млрд"), (1_000_000, "млн"), (1_000, "тис"))
-
-
-def _format_compact(value: int) -> str:
-    """Коротка ціна для щільних списків: 6500 -> '6,5 тис', 47000000 -> '47 млн'.
-
-    Поріг одиниці трохи нижче за круглий (×0.9995), щоб 999 950 ставало
-    '1 млн', а не '1000 тис'.
-    """
-    for threshold, unit in _COMPACT_UNITS:
-        if value >= threshold * 0.9995:
-            scaled = value / threshold
-            text = f"{scaled:.1f}" if scaled < 9.95 else f"{scaled:.0f}"
-            return f"{text.removesuffix('.0').replace('.', ',')} {unit}"
-    return str(value)
-
-
-def _format_pct(pct: float) -> str:
-    """Відсоток зі знаком і комою: +23,4% / −8,1%."""
-    sign = "+" if pct >= 0 else "−"
-    return f"{sign}{abs(pct):.1f}%".replace(".", ",")
-
-
-def _telegram_len(text: str) -> int:
-    """Довжина так, як її рахує Telegram — в одиницях UTF-16 (емодзі = 2)."""
-    return len(text.encode("utf-16-le")) // 2
-
-
-def _split_message(lines: list[str], limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
-    """Розбити рядки на повідомлення, кожне не довше ліміту Telegram.
-
-    Ріжемо тільки між рядками, щоб жоден запис не розірвався навпіл.
-    """
-    messages: list[str] = []
-    current: list[str] = []
-    for line in lines:
-        if current and _telegram_len("\n".join([*current, line])) > limit:
-            messages.append("\n".join(current).strip("\n"))
-            current = []
-        current.append(line)
-    if current:
-        messages.append("\n".join(current).strip("\n"))
-    return messages
+    return f"{clock(moment)} {LOCAL_TZ_LABEL}" if moment else None
 
 
 def _format_duration(seconds: float) -> str:
@@ -172,130 +123,112 @@ def format_top_listings(
 
     lines = [
         f"📦 Топ-{len(listings)} артефактів, виставлених на аукціон у регіоні {region}",
-        f"🕒 {_clock(since)}–{_clock(until)} {LOCAL_TZ_LABEL}",
+        f"🕒 {clock(since)}–{clock(until)} {LOCAL_TZ_LABEL}",
         "",
     ]
     for index, listing in enumerate(listings):
         rank = _MEDALS[index] if index < len(_MEDALS) else f"{index + 1}."
-        color, label = ARTIFACT_QUALITY.get(listing.quality, UNKNOWN_QUALITY)
-        name = f"{listing.artifact.name} · {label}" if label else listing.artifact.name
-        lines.append(f"{rank} {color} {name} — {_format_price(listing.price)}")
+        title = quality_title(listing.artifact.name, listing.quality)
+        lines.append(f"{rank} {title} — {format_price(listing.price)}")
 
     return "\n".join(lines)
 
 
-def _quality_badge(quality: int) -> tuple[str, str]:
-    """(колір, назва) рідкості; для невідомої — знак питання без назви."""
-    return ARTIFACT_QUALITY.get(quality, UNKNOWN_QUALITY)
+def signal_lines(quote: Quote, names: dict[str, str]) -> list[str]:
+    """Два рядки сигналу: що це і наскільки ціна відійшла від звичної.
 
-
-def _price_list_lines(current: dict, names: dict[str, str], order: list[str]) -> list[str]:
-    """Прайс: рядок на артефакт, у ньому медіани всіх рідкостей, що є на ринку.
-
-    Ціни тонкого ринку (менше MARKET_MIN_LOTS лотів) позначаємо зірочкою:
-    на живих даних такі пари давали нісенітницю на кшталт "рідший дешевший
-    за звичайніший" — це випадкова ціна одного-двох лотів, а не ринкова.
+    🔵 Призма · Особый  −25%
+       900 тис · зазвичай 1,2 млн
     """
-    by_artifact: dict[str, dict[int, dict]] = {}
-    for key, entry in current.items():
-        artifact_id, quality = split_key(key)
-        by_artifact.setdefault(artifact_id, {})[quality] = entry
-
-    lines = []
-    has_thin = False
-    for artifact_id in order:
-        entries = by_artifact.get(artifact_id)
-        if not entries:
-            continue  # артефакту зараз немає на ринку
-        cells = []
-        for quality in sorted(entries):
-            thin = entries[quality]["count"] < MARKET_MIN_LOTS
-            has_thin = has_thin or thin
-            mark = "*" if thin else ""
-            cells.append(
-                f"{_quality_badge(quality)[0]} {_format_compact(entries[quality]['median'])}{mark}"
-            )
-        lines.append(f"{names.get(artifact_id, artifact_id)} — {' · '.join(cells)}")
-
-    if has_thin:
-        lines += ["", f"* менше {MARKET_MIN_LOTS} лотів — ціна орієнтовна"]
-    return lines
+    title = quality_title(names.get(quote.artifact_id, quote.artifact_id), quote.quality)
+    return [
+        f"{title}  {format_pct(quote.pct)}",
+        f"   {format_compact(quote.price)} · зазвичай {format_compact(quote.baseline)}",
+    ]
 
 
-def _mover_line(change: PriceChange, names: dict[str, str]) -> str:
-    """Рядок тікера: 🟢▲ +23,4%  🟡 Жвачка · Легендарный  38 млн → 47 млн."""
-    arrow = "🟢▲" if change.pct > 0 else "🔴▼"
-    color, label = _quality_badge(change.quality)
-    name = names.get(change.artifact_id, change.artifact_id)
-    title = f"{name} · {label}" if label else name
+def baseline_note(history: list[dict]) -> str:
+    """Пояснення, з чим порівнюємо: скільки днів уже в базі."""
+    days = len(history)
+    if days >= MARKET_BASELINE_DAYS:
+        return f"Звична ціна — середня за {days} дн."
     return (
-        f"{arrow} {_format_pct(change.pct)}  {color} {title}  "
-        f"{_format_compact(change.old)} → {_format_compact(change.new)}"
+        f"Звична ціна — середня за {days} дн. "
+        f"(історія збирається, повна — {MARKET_BASELINE_DAYS} дн.)"
     )
 
 
 def format_market_digest(
     region: str,
     current: dict,
-    previous: dict | None,
-    previous_taken_at: str | None,
+    history: list[dict],
     now: datetime,
     catalog: tuple[Artifact, ...] = CATALOG,
-) -> list[str]:
-    """Щоденний дайджест ринку артефактів — одне або кілька повідомлень.
+) -> str:
+    """Пост каналу: де зараз вигідно купити і де вигідно продати.
 
-    Без попереднього зрізу — прайс (медіана кожної рідкості), бо порівнювати
-    ще нема з чим. З ним — тікер як у крипті: топ подорожчалих і подешевшалих.
-    Прайс на весь каталог не влазить у ліміт Telegram (4096), тому результат —
-    список повідомлень.
+    Це коротке зведення з найсильнішими сигналами; повний прайс, усі сигнали
+    й пошук артефакту — в меню бота (кнопку під постом додає викликач).
 
     Args:
         region: Код регіону
         current: Сьогоднішній зріз (market.build_snapshot)
-        previous: Попередній зріз або None, якщо це перший
-        previous_taken_at: Коли знімали попередній зріз (ISO) або None
+        history: Попередні денні зрізи (без сьогоднішнього), найстаріший першим
         now: Поточний час
-        catalog: Каталог — для назв і порядку (параметр — для тестів)
+        catalog: Каталог — для назв (параметр — для тестів)
 
     Returns:
-        Повідомлення для відправки по черзі
+        Текст поста
     """
     names = {artifact.id: artifact.name for artifact in catalog}
-    order = [artifact.id for artifact in sorted(catalog, key=lambda a: a.name)]
-    header = [f"📊 Ринок артефактів {region} · {now.astimezone(_LOCAL_TZ):%d.%m}"]
+    lines = [f"📊 Ринок артефактів {region} · {now.astimezone(LOCAL_TZ):%d.%m}"]
 
-    if previous is None:
-        header += [
-            "Перший зріз цін — динаміка з'явиться в наступному дайджесті.",
-            "Медіанна ціна виставлених лотів за рідкістю:",
+    if not history:
+        lines += [
             "",
+            "Перший зріз цін збережено. Сигнали «купити/продати» з'являться з наступного "
+            "дайджесту — поки нема з чим порівнювати.",
+            "",
+            "Прайс усіх артефактів за рідкістю — в боті 👇",
         ]
-        body = _price_list_lines(current, names, order)
-        if not body:
-            body = ["На аукціоні зараз немає артефактів."]
-        return _split_message(header + body)
+        return "\n".join(lines)
 
-    before = parse_iso(previous_taken_at)
-    since = f" проти {before.astimezone(_LOCAL_TZ):%d.%m, %H:%M}" if before else ""
-    header.append(f"Медіанна ціна виставлених лотів{since}")
-
-    gainers, losers = top_movers(
-        compare(previous, current, MARKET_MIN_LOTS), TOP_MOVERS_COUNT, MARKET_MIN_CHANGE_PCT
+    lines.append(baseline_note(history))
+    buys, sells = signals(
+        quotes(current, history, MARKET_MIN_LOTS), MARKET_SIGNAL_PCT, MARKET_MIN_LOTS
     )
-    if not gainers and not losers:
-        return _split_message(header + ["", "Суттєвих змін цін немає."])
 
-    body: list[str] = []
-    if gainers:
-        body += ["", "🟢 Дорожчають"] + [_mover_line(c, names) for c in gainers]
-    if losers:
-        body += ["", "🔴 Дешевшають"] + [_mover_line(c, names) for c in losers]
-    body += [
+    if not buys and not sells:
+        lines += [
+            "",
+            f"😴 Ринок спокійний: жодна ціна не відійшла від звичної на {MARKET_SIGNAL_PCT:g}%+.",
+        ]
+    if buys:
+        lines += ["", f"💰 Вигідно купити — дешевше, ніж зазвичай ({len(buys)})"]
+        for quote in buys[:CHANNEL_SIGNALS_COUNT]:
+            lines += signal_lines(quote, names)
+    if sells:
+        lines += ["", f"📤 Вигідно продати — дорожче, ніж зазвичай ({len(sells)})"]
+        for quote in sells[:CHANNEL_SIGNALS_COUNT]:
+            lines += signal_lines(quote, names)
+
+    lines += [
         "",
-        f"Враховано пари, де лотів було від {MARKET_MIN_LOTS} в обидва дні, "
-        f"і зміни від {MARKET_MIN_CHANGE_PCT:g}%.",
+        f"Сигнал — відхилення від звичної ціни на {MARKET_SIGNAL_PCT:g}%+, "
+        f"пари з {MARKET_MIN_LOTS}+ лотами. Ціни — медіана виставлених лотів.",
+        "Усі сигнали, прайс і пошук артефакту — в боті 👇",
     ]
-    return _split_message(header + body)
+    return "\n".join(lines)
+
+
+def market_button(bot_username: Optional[str], region: str) -> Optional[Button]:
+    """Кнопка під постом, що відкриває меню ринку в особистих повідомленнях бота."""
+    if not bot_username:
+        return None
+    return (
+        "📊 Відкрити аналітику",
+        f"https://t.me/{bot_username}?start={DEEP_LINK_PREFIX}{region}",
+    )
 
 
 class Notifier:
@@ -316,6 +249,7 @@ class Notifier:
         """
         self._chat_ids = chat_ids
         self._client: httpx.AsyncClient | None = None
+        self._username: Optional[str] = None
         if token and chat_ids:
             self._client = httpx.AsyncClient(
                 base_url=f"{TELEGRAM_API_BASE}/bot{token}",
@@ -327,38 +261,55 @@ class Notifier:
                 "TG_TOKEN/TG_CHAT_IDS не задані — подій тільки логуються, у Telegram не йдуть"
             )
 
-    async def _send(self, chat_id: str, text: str) -> None:
+    async def _send(self, chat_id: str, text: str, button: Optional[Button] = None) -> None:
         """Відправити повідомлення в один чат.
 
         Args:
             chat_id: ID чату або юзернейм каналу
             text: Текст повідомлення
+            button: Кнопка-посилання під повідомленням (текст, url) або None
         """
         assert self._client is not None
-        resp = await self._client.post(
-            f"/{TELEGRAM_SEND_METHOD}",
-            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-        )
+        payload: dict = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if button:
+            payload["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "url": button[1]}]]}
+        resp = await self._client.post(f"/{TELEGRAM_SEND_METHOD}", json=payload)
         if resp.status_code == 429:
             retry_after = resp.json().get("parameters", {}).get("retry_after", TELEGRAM_RETRY_AFTER_DEFAULT)
             await asyncio.sleep(retry_after)
-            await self._send(chat_id, text)
+            await self._send(chat_id, text, button)
             return
         resp.raise_for_status()
 
-    async def broadcast(self, text: str) -> None:
+    async def broadcast(self, text: str, button: Optional[Button] = None) -> None:
         """Розіслати повідомлення у всі чати.
 
         Args:
             text: Текст повідомлення
+            button: Кнопка-посилання під повідомленням (текст, url) або None
         """
         if self._client is None:
             return
         for chat_id in self._chat_ids:
             try:
-                await self._send(chat_id, text)
+                await self._send(chat_id, text, button)
             except httpx.HTTPStatusError as exc:
                 log.error("не змогла відправити в %s: %s", chat_id, exc)
+
+    async def bot_username(self) -> Optional[str]:
+        """Юзернейм бота (getMe) — для посилання на меню. None, якщо не вдалося."""
+        if self._client is None:
+            return None
+        if self._username:
+            return self._username
+        try:
+            resp = await self._client.get("/getMe")
+            resp.raise_for_status()
+            self._username = resp.json().get("result", {}).get("username")
+            return self._username
+        except (httpx.HTTPError, ValueError):
+            log.warning("не вдалося дізнатися юзернейм бота — пост піде без кнопки", exc_info=True)
+            return None
 
     async def aclose(self) -> None:
         """Закрити HTTP-клієнт."""

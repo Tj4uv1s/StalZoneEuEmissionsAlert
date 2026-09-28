@@ -16,10 +16,15 @@ class FakeNotifier:
 
     def __init__(self, token, chat_ids):
         self.sent: list[str] = []
+        self.buttons: list = []
         FakeNotifier.instances.append(self)
 
-    async def broadcast(self, text):
+    async def broadcast(self, text, button=None):
         self.sent.append(text)
+        self.buttons.append(button)
+
+    async def bot_username(self):
+        return "TestBot"
 
     async def aclose(self):
         pass
@@ -54,20 +59,23 @@ def test_flags_are_parsed():
 
 @pytest.mark.asyncio
 async def test_digest_is_sent_to_channel(cli_env, monkeypatch, capsys):
-    async def fake_digest(api, region, market, now):
-        return Digest(["📊 дайджест"], {"a1:0": {"median": 1, "count": 9}})
+    async def fake_digest(api, region, history, now):
+        return Digest("📊 дайджест", {"a1:0": {"median": 1, "count": 9}})
 
     monkeypatch.setattr(cli, "build_digest", fake_digest)
     assert await cli.main(["digest"], now=NOW) == 0
 
     assert FakeNotifier.instances[0].sent == ["📊 дайджест"]
+    assert FakeNotifier.instances[0].buttons == [
+        ("📊 Відкрити аналітику", "https://t.me/TestBot?start=market_EU")
+    ]
     assert "📊 дайджест" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
 async def test_dry_run_does_not_send(cli_env, monkeypatch, capsys):
-    async def fake_digest(api, region, market, now):
-        return Digest(["📊 дайджест"], {})
+    async def fake_digest(api, region, history, now):
+        return Digest("📊 дайджест", {})
 
     monkeypatch.setattr(cli, "build_digest", fake_digest)
     assert await cli.main(["digest", "--dry-run"], now=NOW) == 0
@@ -81,18 +89,19 @@ async def test_manual_digest_compares_with_saved_snapshot_but_never_overwrites_i
     cli_env, monkeypatch
 ):
     """Інакше ручний запуск зсунув би щоденний розклад і базу порівняння."""
-    saved = {"EU": {"market": {"taken_at": "2026-09-27T17:00:00Z", "prices": {"a1:0": {"median": 5, "count": 9}}}}}
+    history = [{"taken_at": "2026-09-27T17:00:00Z", "prices": {"a1:0": {"median": 5, "count": 9}}}]
+    saved = {"EU": {"market_history": history}}
     cli_env.write_text(json.dumps(saved), encoding="utf-8")
     seen = []
 
-    async def fake_digest(api, region, market, now):
-        seen.append(market)
-        return Digest(["📊"], {"a1:0": {"median": 999, "count": 9}})
+    async def fake_digest(api, region, history, now):
+        seen.append(history)
+        return Digest("📊", {"a1:0": {"median": 999, "count": 9}})
 
     monkeypatch.setattr(cli, "build_digest", fake_digest)
     await cli.main(["digest"], now=NOW)
 
-    assert seen == [saved["EU"]["market"]]
+    assert seen == [history]
     assert json.loads(cli_env.read_text(encoding="utf-8")) == saved
 
 
@@ -144,7 +153,7 @@ async def test_top_without_emission_data_fails_with_exit_code(cli_env, monkeypat
 
 @pytest.mark.asyncio
 async def test_market_down_fails_with_exit_code(cli_env, monkeypatch):
-    async def fake_digest(api, region, market, now):
+    async def fake_digest(api, region, history, now):
         raise MarketUnavailable("EU: не вдалося отримати лоти 90 з 103 артефактів")
 
     monkeypatch.setattr(cli, "build_digest", fake_digest)
@@ -156,9 +165,9 @@ async def test_region_flag_limits_to_one_region(cli_env, monkeypatch):
     monkeypatch.setattr(cli, "config", dataclasses.replace(cli.config, regions=["EU", "RU"]))
     regions = []
 
-    async def fake_digest(api, region, market, now):
+    async def fake_digest(api, region, history, now):
         regions.append(region)
-        return Digest(["x"], {})
+        return Digest("x", {})
 
     monkeypatch.setattr(cli, "build_digest", fake_digest)
     await cli.main(["digest", "--region", "RU", "--dry-run"], now=NOW)

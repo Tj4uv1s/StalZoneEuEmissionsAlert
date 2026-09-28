@@ -3,5 +3,5 @@ python-dotenv==1.0.1
 certifi==2026.7.22  # явная зависимость: используем напрямую в app/http.py
 tzdata==2025.2  # база часовых поясов IANA: на Windows zoneinfo без неё не находит Europe/Kyiv
 
-# добавим на шаге интерактивных команд (/subscribe и т.п.)
-# aiogram==3.15.0
+# інтерактивне меню ринку в особистих повідомленнях (app/telegram_bot.py)
+aiogram==3.15.0  # закріплено: create_bot лізе у внутрішнє поле AiohttpSession

@@ -5,14 +5,17 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.market import (
-    PriceChange,
+    Quote,
+    add_to_history,
+    baseline,
     build_snapshot,
-    compare,
     digest_due,
     lot_quality,
+    market_history,
     price_key,
+    quotes,
+    signals,
     split_key,
-    top_movers,
     unit_price,
 )
 
@@ -93,58 +96,117 @@ def test_empty_market_gives_empty_snapshot():
     assert build_snapshot({"a1": []}) == {}
 
 
-# --- порівняння -------------------------------------------------------------
+# --- історія зрізів -----------------------------------------------------
 
-def entry(median, count=5):
-    return {"median": median, "count": count}
-
-
-def test_compare_percent_change():
-    changes = compare({"a1:3": entry(100)}, {"a1:3": entry(125)}, min_count=3)
-    assert changes == [PriceChange("a1", 3, 100, 125, 25.0)]
-
-
-def test_compare_skips_thin_markets_on_either_day():
-    previous = {"a1:3": entry(100, count=2), "a2:3": entry(100, count=5)}
-    current = {"a1:3": entry(900, count=5), "a2:3": entry(900, count=2)}
-    assert compare(previous, current, min_count=3) == []
+def day(taken_at, **prices):
+    """Денний зріз: day("2026-09-21T17:00:00Z", **{"a1:3": (100, 9)})."""
+    return {
+        "taken_at": taken_at,
+        "prices": {key: {"median": m, "count": c} for key, (m, c) in prices.items()},
+    }
 
 
-def test_compare_skips_pairs_missing_on_one_side():
-    changes = compare({"old:1": entry(100)}, {"new:1": entry(100)}, min_count=3)
-    assert changes == []
+def test_history_reads_new_format():
+    history = [day("2026-09-21T17:00:00Z"), day("2026-09-22T17:00:00Z")]
+    assert market_history({"market_history": history}) == history
+
+
+def test_history_migrates_old_single_snapshot():
+    """Оновлення бота не має обнуляти вже знятий зріз старого формату."""
+    old = {"taken_at": "2026-09-28T09:00:00Z", "prices": {}}
+    assert market_history({"market": old}) == [old]
 
 
 @pytest.mark.parametrize(
-    "bad",
-    [entry(0), {"median": "100", "count": 5}, {"count": 5}, "сміття", None, {"median": 100}],
+    "state",
+    [{}, {"market_history": "сміття"}, {"market_history": [None, 1, {"prices": {}}, {"taken_at": "не час", "prices": {}}]}],
 )
-def test_compare_ignores_broken_previous_entries(bad):
-    assert compare({"a1:3": bad}, {"a1:3": entry(100)}, min_count=3) == []
+def test_history_drops_broken_entries(state):
+    assert market_history(state) == []
 
 
-def test_compare_ignores_broken_keys_in_old_state():
-    assert compare({"без-двокрапки": entry(100)}, {"без-двокрапки": entry(200)}, 3) == []
+def test_add_to_history_keeps_last_n():
+    history = [day(f"2026-09-2{i}T17:00:00Z") for i in range(1, 9)]
+    new = add_to_history(history, {"a1:3": {"median": 1, "count": 9}}, "2026-09-29T17:00:00Z", keep=8)
+    assert len(new) == 8
+    assert new[0]["taken_at"] == "2026-09-22T17:00:00Z"
+    assert new[-1]["taken_at"] == "2026-09-29T17:00:00Z"
+    assert len(history) == 8  # вхідна історія не змінилась
 
 
-def test_top_movers_split_and_order():
-    changes = [
-        PriceChange("a", 0, 100, 150, 50.0),
-        PriceChange("b", 0, 100, 110, 10.0),
-        PriceChange("c", 0, 100, 60, -40.0),
-        PriceChange("d", 0, 100, 95, -5.0),
-        PriceChange("e", 0, 100, 100, 0.0),  # без змін — ні туди, ні туди
+# --- звична ціна --------------------------------------------------------
+
+def test_baseline_is_mean_of_daily_medians():
+    history = [
+        day("2026-09-21T17:00:00Z", **{"a1:3": (100, 9)}),
+        day("2026-09-22T17:00:00Z", **{"a1:3": (200, 9)}),
+        day("2026-09-23T17:00:00Z", **{"a1:3": (300, 9)}),
     ]
-    gainers, losers = top_movers(changes, limit=10)
-    assert [c.artifact_id for c in gainers] == ["a", "b"]
-    assert [c.artifact_id for c in losers] == ["c", "d"]
+    assert baseline(history, "a1:3", min_count=5) == (200, 3)
 
 
-def test_top_movers_respects_limit():
-    changes = [PriceChange(str(i), 0, 100, 100 + i, float(i)) for i in range(1, 20)]
-    gainers, losers = top_movers(changes, limit=3)
-    assert [c.pct for c in gainers] == [19.0, 18.0, 17.0]
-    assert losers == []
+def test_baseline_skips_thin_days():
+    history = [
+        day("2026-09-21T17:00:00Z", **{"a1:3": (100, 9)}),
+        day("2026-09-22T17:00:00Z", **{"a1:3": (99_999, 1)}),  # один лот — випадкова ціна
+    ]
+    assert baseline(history, "a1:3", min_count=5) == (100, 1)
+
+
+def test_baseline_missing_pair_is_none():
+    assert baseline([day("2026-09-21T17:00:00Z")], "a1:3", min_count=5) is None
+
+
+# --- котирування й сигнали ------------------------------------------------
+
+HISTORY = [
+    day("2026-09-21T17:00:00Z", **{"cheap:2": (1000, 9), "dear:4": (1000, 9), "calm:1": (1000, 9), "thin:0": (1000, 9)}),
+    day("2026-09-22T17:00:00Z", **{"cheap:2": (1000, 9), "dear:4": (1000, 9), "calm:1": (1000, 9), "thin:0": (1000, 9)}),
+]
+CURRENT = {
+    "cheap:2": {"median": 750, "count": 9},   # −25% — купити
+    "dear:4": {"median": 1250, "count": 9},   # +25% — продати
+    "calm:1": {"median": 1050, "count": 9},   # +5% — нічого
+    "thin:0": {"median": 100, "count": 2},    # −90%, але 2 лоти — не сигнал
+    "new:5": {"median": 5000, "count": 9},    # немає бази — не сигнал
+}
+
+
+def test_quote_percent_against_baseline():
+    by_id = {q.artifact_id: q for q in quotes(CURRENT, HISTORY, min_count=5)}
+    assert by_id["cheap"].pct == -25.0
+    assert by_id["cheap"].baseline == 1000
+    assert by_id["cheap"].days == 2
+    assert by_id["new"].pct is None
+    assert by_id["new"].days == 0
+
+
+def test_signals_buy_cheap_sell_dear_ignore_calm_thin_and_new():
+    buys, sells = signals(quotes(CURRENT, HISTORY, min_count=5), threshold_pct=10, min_count=5)
+    assert [q.artifact_id for q in buys] == ["cheap"]
+    assert [q.artifact_id for q in sells] == ["dear"]
+
+
+def test_signals_sorted_strongest_first():
+    all_quotes = [
+        Quote("a", 0, 90, 9, 100, 7),   # −10%
+        Quote("b", 0, 50, 9, 100, 7),   # −50%
+        Quote("c", 0, 130, 9, 100, 7),  # +30%
+        Quote("d", 0, 200, 9, 100, 7),  # +100%
+    ]
+    buys, sells = signals(all_quotes, threshold_pct=10, min_count=5)
+    assert [q.artifact_id for q in buys] == ["b", "a"]
+    assert [q.artifact_id for q in sells] == ["d", "c"]
+
+
+def test_signal_threshold_is_inclusive():
+    buys, sells = signals([Quote("a", 0, 90, 9, 100, 7), Quote("b", 0, 91, 9, 100, 7)], 10, 5)
+    assert [q.artifact_id for q in buys] == ["a"]
+
+
+def test_quotes_skip_broken_current_entries():
+    current = {"ok:1": {"median": 10, "count": 5}, "bad": {"median": 10, "count": 5}, "x:2": "сміття"}
+    assert [q.artifact_id for q in quotes(current, [], min_count=5)] == ["ok"]
 
 
 # --- розклад дайджесту -------------------------------------------------------
@@ -189,15 +251,3 @@ def test_retry_at_postpones_attempt():
 def test_broken_last_timestamp_is_treated_as_no_snapshot():
     assert digest_due("не час", utc(2026, 9, 28, 10, 0), 12, KYIV) is True
 
-
-def test_top_movers_drops_noise_below_min_pct():
-    changes = [
-        PriceChange("big-up", 0, 100, 120, 20.0),
-        PriceChange("tiny-up", 0, 1000, 1004, 0.4),
-        PriceChange("tiny-down", 0, 1000, 997, -0.3),
-        PriceChange("big-down", 0, 100, 80, -20.0),
-        PriceChange("edge", 0, 100, 101, 1.0),  # рівно на межі — лишаємо
-    ]
-    gainers, losers = top_movers(changes, limit=10, min_pct=1.0)
-    assert [c.artifact_id for c in gainers] == ["big-up", "edge"]
-    assert [c.artifact_id for c in losers] == ["big-down"]

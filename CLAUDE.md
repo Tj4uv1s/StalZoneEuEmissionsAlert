@@ -16,8 +16,18 @@ tracker.py    — ЧИСТАЯ логика: (регион, старое сос�
 storage.py    — состояние в JSON за интерфейсом get/set (позже SQLite, интерфейс не трогать)
 notify.py     — отправка в Telegram напрямую через Bot API; без TG_TOKEN/TG_CHAT_IDS — только логирует
 main.py       — цикл: poll_once по всем регионам -> diff -> broadcast -> sleep(адаптивная пауза)
-tests/        — pytest (tracker + stalcraft на respx)
+market.py     — ЧИСТАЯ логика рынка: срезы цен, "обычная" цена за 7 дней, сигналы купить/продать
+views.py      — ЧИСТЫЕ экраны меню в личке: данные -> View(text HTML, кнопки); тестируется без Telegram
+auction.py    — обход лотов аукциона по каталогу артефактов (сеть)
+reports.py    — сборка топа лотов и дайджеста, общая для main.py и cli.py
+telegram_bot.py — тонкий слой aiogram: /start, кнопки, поиск текстом -> views.py
+cli.py        — ручной запуск отчётов (`python -m app.cli top|digest [--dry-run]`)
+tests/        — pytest (чистая логика, respx для API, feed_update для aiogram)
 ```
+
+Меню в личке читает СОХРАНЁННЫЙ дневной срез из state, а не рынок вживую: живой обход —
+~30 с и ~100 запросов на каждое нажатие. getUpdates может слушать только один процесс
+на токен (иначе 409) — ещё одна причина для single_instance.
 
 Правило: `tracker` остаётся без побочных эффектов — это то, что реально покрывается тестами.
 Любую логику с датами/временем передавать в него аргументом, а не читать внутри.
@@ -75,9 +85,9 @@ Python 3.12, venv в `.venv`. `.env` не коммитится, шаблон —
 
 ## Библиотеки
 
-Есть: `httpx`, `python-dotenv`, `certifi` (явно, из-за `app/http.py`); dev: `pytest`, `pytest-asyncio`, `respx`.
+Есть: `httpx`, `python-dotenv`, `certifi` (явно, из-за `app/http.py`), `tzdata` (Windows zoneinfo),
+`aiogram==3.15.0` (меню в личке; закреплён — `create_bot` лезет во внутреннее поле сессии ради SSL); dev: `pytest`, `pytest-asyncio`, `respx`.
 Добавлять по мере надобности, не раньше:
-- `aiogram` 3.x — когда будут команды от юзеров (`/subscribe`, регион на юзера).
 - `sqlite3` (stdlib) — когда JSON перестанет хватать (подписчики). Без ORM.
 - `ruff` (dev) — линт+формат; в коде уже есть `# noqa`.
 Не тащить: веб-фреймворк, Celery/Redis, apscheduler, ORM, сторонний враппер stalcraft-api

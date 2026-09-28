@@ -1,32 +1,45 @@
-"""Ринкова аналітика: зрізи цін артефактів і порівняння між днями.
+"""Ринкова аналітика: зрізи цін, "звична" ціна за тиждень, сигнали купити/продати.
 
 Як і tracker.py — чиста логіка: ні мережі, ні файлів, ні читання годинника.
-Лоти й поточний час приходять аргументами, тому все покривається тестами.
+Лоти, історія й поточний час приходять аргументами, тому все покривається тестами.
 
 "Ціна" пари (артефакт, рідкість) — медіана ціни викупу серед її активних
 лотів. Не мінімум: один лот "за 1" чи троль "за 999 млн" ламали б аналітику.
 Не історія продажів: у ній немає рідкості. Тож це медіана ЗАПИТУВАНИХ цін,
 а не цін реальних угод — ринок пропозиції, а не угод.
+
+"Звична" ціна (база) — середнє денних медіан за попередні дні (до тижня).
+Сигнал — відхилення поточної ціни від бази: помітно дешевше за звичне —
+вигідно купити, помітно дорожче — вигідно продати. База за тиждень, а не
+вчорашній день: одна випадкова пачка лотів не дає хибного "купуй".
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
-from statistics import median
+from statistics import mean, median
 from typing import Optional
 
 from app.tracker import parse_iso
 
 
 @dataclass(frozen=True)
-class PriceChange:
-    """Зміна медіанної ціни пари (артефакт, рідкість) між двома зрізами."""
+class Quote:
+    """Поточна ціна пари (артефакт, рідкість) проти її звичної ціни."""
 
     artifact_id: str
     quality: int
-    old: int
-    new: int
-    pct: float  # (new - old) / old * 100
+    price: int  # медіана зараз
+    count: int  # скільки лотів зараз
+    baseline: Optional[int]  # звична ціна (середнє денних медіан) або None
+    days: int  # за скільки днів порахована база
+
+    @property
+    def pct(self) -> Optional[float]:
+        """Відхилення від звичної ціни, %. None, якщо бази немає."""
+        if not self.baseline:
+            return None
+        return (self.price - self.baseline) / self.baseline * 100
 
 
 def lot_quality(lot: dict) -> Optional[int]:
@@ -94,56 +107,105 @@ def _usable(entry: object, min_count: int) -> bool:
     )
 
 
-def compare(previous: dict, current: dict, min_count: int) -> list[PriceChange]:
-    """Зміни цін між двома зрізами.
+def market_history(state: dict) -> list[dict]:
+    """Денні зрізи регіону зі стану, найстаріший першим: [{"taken_at", "prices"}].
 
-    Порівнюємо лише пари, де лотів було не менше `min_count` в ОБИДВА дні:
-    на тонкому ринку один лот дає стрибки на сотні відсотків, і такий шум
-    забив би весь топ змін. Пари, яких немає в одному зі зрізів, пропускаються.
+    Читає й старий формат (єдиний зріз у "market"), щоб оновлення бота не
+    обнуляло накопичену історію. Криві записи відкидаються.
+    """
+    raw = state.get("market_history")
+    if raw is None and isinstance(state.get("market"), dict):
+        raw = [state["market"]]
+    return [
+        entry
+        for entry in (raw if isinstance(raw, list) else [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("prices"), dict)
+        and parse_iso(entry.get("taken_at")) is not None
+    ]
 
-    Args:
-        previous: Попередній зріз (build_snapshot)
-        current: Поточний зріз
-        min_count: Мінімум лотів у парі в кожному зрізі
+
+def add_to_history(
+    history: list[dict], snapshot: dict, taken_at: str, keep: int
+) -> list[dict]:
+    """Нова історія: старі зрізи + сьогоднішній, не більше `keep` останніх."""
+    return [*history, {"taken_at": taken_at, "prices": snapshot}][-keep:]
+
+
+def baseline(history: list[dict], key: str, min_count: int) -> Optional[tuple[int, int]]:
+    """Звична ціна пари: середнє її денних медіан у `history`.
+
+    Дні, де пара була на тонкому ринку (менше `min_count` лотів), не
+    враховуються — там медіана випадкова.
 
     Returns:
-        Зміни без певного порядку
+        (звична ціна, скільки днів врахували) або None, якщо жодного дня немає
     """
-    changes = []
-    for key, now_entry in current.items():
-        before = previous.get(key)
-        if not (_usable(before, min_count) and _usable(now_entry, min_count)):
+    medians = [
+        day["prices"][key]["median"]
+        for day in history
+        if _usable(day["prices"].get(key), min_count)
+    ]
+    return (round(mean(medians)), len(medians)) if medians else None
+
+
+def quotes(current: dict, history: list[dict], min_count: int) -> list[Quote]:
+    """Поточні ціни всіх пар зі зрізу разом із їхніми звичними цінами.
+
+    Args:
+        current: Сьогоднішній зріз (build_snapshot)
+        history: Попередні денні зрізи (без сьогоднішнього)
+        min_count: Мінімум лотів, щоб день ішов у базу
+
+    Returns:
+        Котирування без певного порядку (криві ключі зрізу пропускаються)
+    """
+    result = []
+    for key, entry in current.items():
+        if not _usable(entry, 1):
             continue
         try:
             artifact_id, quality = split_key(key)
         except ValueError:
-            continue  # кривий ключ у старому стані
-        old, new = before["median"], now_entry["median"]
-        changes.append(PriceChange(artifact_id, quality, old, new, (new - old) / old * 100))
-    return changes
+            continue
+        base = baseline(history, key, min_count)
+        result.append(
+            Quote(
+                artifact_id,
+                quality,
+                entry["median"],
+                entry["count"],
+                base[0] if base else None,
+                base[1] if base else 0,
+            )
+        )
+    return result
 
 
-def top_movers(
-    changes: list[PriceChange], limit: int, min_pct: float = 0.0
-) -> tuple[list[PriceChange], list[PriceChange]]:
-    """Найбільше подорожчали й найбільше подешевшали.
+def is_solid(quote: Quote, min_count: int) -> bool:
+    """Чи досить лотів ЗАРАЗ, щоб поточна ціна щось означала."""
+    return quote.count >= min_count
 
-    Args:
-        changes: Зміни (compare)
-        limit: Скільки показати в кожному напрямку
-        min_pct: Зміни, менші за модулем, вважаємо шумом і відкидаємо
+
+def signals(
+    all_quotes: list[Quote], threshold_pct: float, min_count: int
+) -> tuple[list[Quote], list[Quote]]:
+    """Сигнали: що зараз помітно дешевше і що помітно дорожче за звичне.
+
+    Беруться тільки пари з базою й досить товстим ринком зараз: на тонкому
+    ринку один лот дає "−60%", і гравці купували б за хибним сигналом.
 
     Returns:
-        (зростання за спаданням %, падіння від найглибшого), не більше `limit` кожне
+        (купити — від найбільшої знижки, продати — від найбільшого зростання)
     """
-    threshold = max(min_pct, 0.0)
-    gainers = sorted(
-        (c for c in changes if c.pct > 0 and c.pct >= threshold),
-        key=lambda c: c.pct,
-        reverse=True,
+    tradable = [
+        q for q in all_quotes if q.pct is not None and is_solid(q, min_count)
+    ]
+    buys = sorted((q for q in tradable if q.pct <= -threshold_pct), key=lambda q: q.pct)
+    sells = sorted(
+        (q for q in tradable if q.pct >= threshold_pct), key=lambda q: q.pct, reverse=True
     )
-    losers = sorted((c for c in changes if c.pct < 0 and -c.pct >= threshold), key=lambda c: c.pct)
-    return gainers[:limit], losers[:limit]
+    return buys, sells
 
 
 def digest_due(

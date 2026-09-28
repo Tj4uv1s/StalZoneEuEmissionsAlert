@@ -53,10 +53,10 @@ async def test_build_digest_returns_snapshot_and_messages(monkeypatch):
         return MarketFetch(lots={"a1": _lots(100, 200, 300)}, failed=0, total=1)
 
     monkeypatch.setattr(reports, "fetch_market", fake_fetch)
-    digest = await build_digest(None, "EU", {}, NOW)
+    digest = await build_digest(None, "EU", [], NOW)
 
     assert digest.snapshot == {"a1:2": {"median": 200, "count": 3}}
-    assert digest.messages and "Перший зріз цін" in digest.messages[0]
+    assert "Перший зріз цін" in digest.text
 
 
 @pytest.mark.asyncio
@@ -66,7 +66,7 @@ async def test_build_digest_refuses_mostly_failed_market(monkeypatch):
 
     monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     with pytest.raises(MarketUnavailable, match="60 з 103"):
-        await build_digest(None, "EU", {}, NOW)
+        await build_digest(None, "EU", [], NOW)
 
 
 @pytest.mark.asyncio
@@ -75,5 +75,5 @@ async def test_build_digest_tolerates_minority_of_failures(monkeypatch):
         return MarketFetch(lots={"a1": _lots(100)}, failed=51, total=103)  # рівно менше половини
 
     monkeypatch.setattr(reports, "fetch_market", fake_fetch)
-    digest = await build_digest(None, "EU", {}, NOW)
+    digest = await build_digest(None, "EU", [], NOW)
     assert digest.snapshot

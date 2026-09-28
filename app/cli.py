@@ -23,7 +23,8 @@ from typing import Optional
 import httpx
 
 from app.config import config
-from app.notify import Notifier
+from app.market import market_history
+from app.notify import Notifier, market_button
 from app.reports import MarketUnavailable, build_digest, build_top_report, last_emission_window
 from app.stalcraft import StalcraftClient
 from app.storage import JsonStorage
@@ -69,9 +70,8 @@ async def collect(
         text = await build_top_report(api, region, *window)
         return [text] if text else []
 
-    market = storage.get(region).get("market") or {}
-    digest = await build_digest(api, region, market, now)
-    return digest.messages
+    digest = await build_digest(api, region, market_history(storage.get(region)), now)
+    return [digest.text]
 
 
 def _console_utf8() -> None:
@@ -105,10 +105,17 @@ async def main(argv: Optional[list[str]] = None, now: Optional[datetime] = None)
                     if not messages:
                         print(f"{region}: після викиду артефактів на аукціон не виставляли — нема що надсилати")
                         continue
+                    button = None
+                    if args.command == "digest":
+                        username = await notifier.bot_username() if notifier else None
+                        button = market_button(username, region)
                     for text in messages:
-                        print(text, end="\n\n")
+                        print(text)
+                        if button:
+                            print(f"[кнопка: {button[0]} -> {button[1]}]")
+                        print()
                         if notifier:
-                            await notifier.broadcast(text)
+                            await notifier.broadcast(text, button)
                 except (ReportError, MarketUnavailable, httpx.HTTPError) as exc:
                     log.error("%s: %s", region, exc)
                     exit_code = 1

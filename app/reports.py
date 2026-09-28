@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from app.auction import fetch_market, top_listings_between
+from app.constants import MARKET_BASELINE_DAYS
 from app.market import build_snapshot
 from app.notify import format_market_digest, format_top_listings
 from app.stalcraft import StalcraftClient
@@ -22,9 +23,9 @@ class MarketUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class Digest:
-    """Готовий дайджест: повідомлення для відправки й зріз, з якого його зібрано."""
+    """Готовий дайджест: пост для каналу й зріз, з якого його зібрано."""
 
-    messages: list[str]
+    text: str
     snapshot: dict
 
 
@@ -37,14 +38,14 @@ async def build_top_report(
 
 
 async def build_digest(
-    api: StalcraftClient, region: str, market: dict, now: datetime
+    api: StalcraftClient, region: str, history: list[dict], now: datetime
 ) -> Digest:
-    """Зріз ринку зараз і дайджест проти збереженого зрізу `market`.
+    """Зріз ринку зараз і дайджест сигналів проти звичних цін з історії.
 
     Args:
         api: Клієнт API
         region: Код регіону
-        market: Збережений зріз {"taken_at", "prices"} або {} — тоді прайс
+        history: Попередні денні зрізи (market.market_history); [] — перший дайджест
         now: Поточний час
 
     Raises:
@@ -56,10 +57,8 @@ async def build_digest(
             f"{region}: не вдалося отримати лоти {fetched.failed} з {fetched.total} артефактів"
         )
     snapshot = build_snapshot(fetched.lots)
-    messages = format_market_digest(
-        region, snapshot, market.get("prices"), market.get("taken_at"), now
-    )
-    return Digest(messages, snapshot)
+    baseline_window = history[-MARKET_BASELINE_DAYS:]
+    return Digest(format_market_digest(region, snapshot, baseline_window, now), snapshot)
 
 
 async def last_emission_window(

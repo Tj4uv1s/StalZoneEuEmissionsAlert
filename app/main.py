@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -19,15 +20,17 @@ from app.config import config
 from app.constants import (
     LOCAL_TZ_LABEL,
     LOCAL_TZ_NAME,
+    MARKET_BASELINE_DAYS,
     MARKET_RETRY_DELAY,
     RATE_LIMIT_SAFETY_MARGIN,
 )
-from app.market import digest_due
-from app.notify import Notifier, format_event
+from app.market import add_to_history, digest_due, market_history
+from app.notify import Button, Notifier, format_event, market_button
 from app.reports import MarketUnavailable, build_digest, build_top_report
 from app.stalcraft import RateLimit, StalcraftClient
 from app.single_instance import AlreadyRunning, SingleInstance
 from app.storage import JsonStorage
+from app.telegram_bot import run_menu
 from app.tracker import ENDED, diff, parse_iso, to_iso
 
 log = logging.getLogger(__name__)
@@ -63,7 +66,11 @@ def _next_delay(rate: RateLimit, floor: float) -> float:
 
 
 async def _send_once(
-    region: str, notifier: Notifier, messages: list[str], what: str
+    region: str,
+    notifier: Notifier,
+    messages: list[str],
+    what: str,
+    button: Optional[Button] = None,
 ) -> None:
     """Розіслати результат важкого збору рівно один раз, без повторів.
 
@@ -78,7 +85,7 @@ async def _send_once(
     try:
         for text in messages:
             log.info("%s: %s -> %r", region, what, text)
-            await notifier.broadcast(text)
+            await notifier.broadcast(text, button)
     except httpx.HTTPError:
         log.exception("%s: не вдалося розіслати %s — повторювати не будемо", region, what)
 
@@ -143,9 +150,9 @@ async def _handle_market_digest(
         api: Клієнт API
         now: Поточний час
     """
-    market = state.get("market") or {}
+    history = market_history(state)
     if not digest_due(
-        market.get("taken_at"),
+        history[-1]["taken_at"] if history else None,
         now,
         config.market_digest_hour,
         _LOCAL_TZ,
@@ -154,16 +161,21 @@ async def _handle_market_digest(
         return
 
     try:
-        digest = await build_digest(api, region, market, now)
+        digest = await build_digest(api, region, history, now)
     except MarketUnavailable as exc:
         log.warning("%s — зріз не зберігаю, спробую пізніше", exc)
         state["market_retry_at"] = to_iso(now + timedelta(seconds=MARKET_RETRY_DELAY))
         return
 
-    # Спершу зберігаємо зріз, потім шлемо — див. _send_once
-    state["market"] = {"taken_at": to_iso(now), "prices": digest.snapshot}
+    # Спершу зберігаємо зріз, потім шлемо — див. _send_once.
+    # +1: тиждень днів для звичної ціни плюс сьогоднішній, який показує меню бота.
+    state["market_history"] = add_to_history(
+        history, digest.snapshot, to_iso(now), keep=MARKET_BASELINE_DAYS + 1
+    )
+    state.pop("market", None)  # старий формат — уже перенесений в історію
     state.pop("market_retry_at", None)
-    await _send_once(region, notifier, digest.messages, "дайджест ринку")
+    button = market_button(await notifier.bot_username(), region)
+    await _send_once(region, notifier, [digest.text], "дайджест ринку", button)
 
 
 async def poll_once(
@@ -244,11 +256,21 @@ async def _run() -> None:
             LOCAL_TZ_LABEL,
             config.api_base,
         )
+        # Меню ринку в особистих — окремою задачею поруч із циклом опитування.
+        # Без токена меню немає (нема куди слати), а сповіщення лише логуються.
+        menu_task = (
+            asyncio.create_task(run_menu(config.tg_token, storage.get, config.regions))
+            if config.tg_token
+            else None
+        )
         try:
             while True:
                 delay = await poll_once(api, storage, notifier)
                 await asyncio.sleep(delay)
         finally:
+            if menu_task:
+                menu_task.cancel()
+                await asyncio.gather(menu_task, return_exceptions=True)
             await notifier.aclose()
 
 
