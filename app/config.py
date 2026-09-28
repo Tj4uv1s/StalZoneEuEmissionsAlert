@@ -7,7 +7,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.constants import DEFAULT_ANNOUNCE_MAX_AGE, DEFAULT_TOP_LOTS_DELAY
+from app.constants import (
+    DEFAULT_ANNOUNCE_MAX_AGE,
+    DEFAULT_MARKET_DIGEST_HOUR,
+    DEFAULT_TOP_LOTS_DELAY,
+)
 
 load_dotenv()
 
@@ -40,6 +44,11 @@ class Config:
     """Секунди після кінця викиду, коли рахуємо топ виставлених на аукціон артефактів
     (час на активний збір і виставлення)."""
 
+    market_digest_hour: int = int(
+        os.getenv("MARKET_DIGEST_HOUR", str(DEFAULT_MARKET_DIGEST_HOUR))
+    )
+    """Київська година (0-23), з якої раз на добу виходить дайджест ринку."""
+
     tg_token: str = os.getenv("TG_TOKEN", "")
     tg_chat_ids: list[str] = field(default_factory=lambda: _split(os.getenv("TG_CHAT_IDS", "")))
 
@@ -62,6 +71,11 @@ class Config:
         ]
         if missing:
             raise RuntimeError(f"Не задані змінні оточення: {', '.join(missing)}")
+        if not 0 <= self.market_digest_hour <= 23:
+            # Інакше digest_due мовчки ніколи не спрацює (година 24+ не настає)
+            raise RuntimeError(
+                f"MARKET_DIGEST_HOUR має бути 0-23, а не {self.market_digest_hour}"
+            )
 
 
 config = Config()

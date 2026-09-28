@@ -158,3 +158,149 @@ def test_window_is_shown_in_kyiv_time_across_dst():
     winter_until = datetime(2026, 12, 26, 10, 20, tzinfo=timezone.utc)
     text = format_top_listings("EU", [_listing(SPRING, 1, 0)], winter_since, winter_until)
     assert "🕒 11:50–12:20 за Києвом" in text
+
+
+# --- format_market_digest ----------------------------------------------
+
+from app.constants import MARKET_MIN_CHANGE_PCT, MARKET_MIN_LOTS  # noqa: E402
+from app.notify import _format_compact, _telegram_len, format_market_digest  # noqa: E402
+
+SOLID = MARKET_MIN_LOTS + 5  # лотів із запасом — пара точно не "тонка"
+FOOTER = (
+    f"Враховано пари, де лотів було від {MARKET_MIN_LOTS} в обидва дні, "
+    f"і зміни від {MARKET_MIN_CHANGE_PCT:g}%."
+)
+
+DIGEST_NOW = datetime(2026, 9, 28, 9, 0, tzinfo=timezone.utc)  # 12:00 Києва
+GUM = Artifact(id="gum", name="Жвачка", category="biochemical")
+HEEL = Artifact(id="heel", name="Каблук", category="gravity")
+DIGEST_CATALOG = (HEEL, GUM)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (950, "950"),
+        (6_500, "6,5 тис"),
+        (65_000, "65 тис"),
+        (388_888, "389 тис"),
+        (999_950, "1 млн"),  # не "1000 тис"
+        (1_100_000, "1,1 млн"),
+        (9_960_000, "10 млн"),  # не "10,0 млн"
+        (47_000_000, "47 млн"),
+        (1_234_000_000, "1,2 млрд"),
+    ],
+)
+def test_compact_price(value, expected):
+    assert _format_compact(value) == expected
+
+
+def test_first_digest_is_price_list_sorted_by_name():
+    current = {
+        "gum:0": {"median": 20_000, "count": SOLID},
+        "gum:5": {"median": 47_000_000, "count": SOLID},
+        "heel:4": {"median": 2_500_000, "count": SOLID},
+    }
+    [text] = format_market_digest("EU", current, None, None, DIGEST_NOW, DIGEST_CATALOG)
+    assert text == (
+        "📊 Ринок артефактів EU · 28.09\n"
+        "Перший зріз цін — динаміка з'явиться в наступному дайджесті.\n"
+        "Медіанна ціна виставлених лотів за рідкістю:\n"
+        "\n"
+        "Жвачка — ⚪ 20 тис · 🟡 47 млн\n"
+        "Каблук — 🔴 2,5 млн"
+    )
+
+
+def test_first_digest_on_empty_market():
+    [text] = format_market_digest("EU", {}, None, None, DIGEST_NOW, DIGEST_CATALOG)
+    assert text.endswith("На аукціоні зараз немає артефактів.")
+
+
+def test_movers_digest_like_crypto_ticker():
+    previous = {
+        "gum:5": {"median": 40_000_000, "count": SOLID},
+        "heel:4": {"median": 2_000_000, "count": SOLID},
+    }
+    current = {
+        "gum:5": {"median": 47_000_000, "count": SOLID},
+        "heel:4": {"median": 1_500_000, "count": SOLID},
+    }
+    [text] = format_market_digest(
+        "EU", current, previous, "2026-09-27T09:00:00Z", DIGEST_NOW, DIGEST_CATALOG
+    )
+    assert text == (
+        "📊 Ринок артефактів EU · 28.09\n"
+        "Медіанна ціна виставлених лотів проти 27.09, 12:00\n"
+        "\n"
+        "🟢 Дорожчають\n"
+        "🟢▲ +17,5%  🟡 Жвачка · Легендарный  40 млн → 47 млн\n"
+        "\n"
+        "🔴 Дешевшають\n"
+        "🔴▼ −25,0%  🔴 Каблук · Исключительный  2 млн → 1,5 млн\n"
+        "\n" + FOOTER
+    )
+
+
+def test_only_gainers_omits_losers_section():
+    previous = {"gum:5": {"median": 100, "count": SOLID}}
+    current = {"gum:5": {"median": 200, "count": SOLID}}
+    [text] = format_market_digest("EU", current, previous, None, DIGEST_NOW, DIGEST_CATALOG)
+    assert "🟢 Дорожчають" in text
+    assert "🔴 Дешевшають" not in text
+
+
+def test_no_significant_changes_message():
+    previous = {"gum:5": {"median": 100, "count": 1}}  # тонкий ринок — не порівнюємо
+    current = {"gum:5": {"median": 900, "count": 1}}
+    [text] = format_market_digest(
+        "EU", current, previous, "2026-09-27T09:00:00Z", DIGEST_NOW, DIGEST_CATALOG
+    )
+    assert text.endswith("Суттєвих змін цін немає.")
+
+
+def test_unknown_artifact_id_falls_back_to_id():
+    previous = {"ghost:2": {"median": 100, "count": SOLID}}
+    current = {"ghost:2": {"median": 150, "count": SOLID}}
+    [text] = format_market_digest("EU", current, previous, None, DIGEST_NOW, DIGEST_CATALOG)
+    assert "🔵 ghost · Особый" in text
+
+
+def test_big_price_list_is_split_under_telegram_limit():
+    """103 артефакти × до 6 рідкостей не влазять в одне повідомлення."""
+    catalog = tuple(Artifact(id=f"a{i}", name=f"Артефакт номер {i:03d}", category="gravity") for i in range(103))
+    current = {
+        f"a{i}:{q}": {"median": 1_234_567 * (q + 1), "count": 5}
+        for i in range(103)
+        for q in range(6)
+    }
+    messages = format_market_digest("EU", current, None, None, DIGEST_NOW, catalog)
+
+    assert len(messages) > 1
+    assert all(_telegram_len(m) <= 4096 for m in messages)
+    # жоден артефакт не загубився й не розірвався між повідомленнями
+    rows = [line for m in messages for line in m.splitlines() if line.startswith("Артефакт номер")]
+    assert len(rows) == 103
+
+
+def test_telegram_length_counts_emoji_as_two():
+    assert _telegram_len("🟡") == 2
+    assert _telegram_len("Ж") == 1
+
+
+def test_thin_market_prices_are_marked_with_footnote():
+    current = {
+        "gum:3": {"median": 9_600_000, "count": 1},  # один лот — випадкова ціна
+        "gum:4": {"median": 8_000_000, "count": 2},
+        "heel:0": {"median": 20_000, "count": SOLID},
+    }
+    [text] = format_market_digest("EU", current, None, None, DIGEST_NOW, DIGEST_CATALOG)
+    assert "Жвачка — 🟣 9,6 млн* · 🔴 8 млн*" in text
+    assert "Каблук — ⚪ 20 тис\n" in text  # без зірочки
+    assert text.endswith(f"* менше {MARKET_MIN_LOTS} лотів — ціна орієнтовна")
+
+
+def test_no_footnote_when_all_prices_are_solid():
+    current = {"heel:0": {"median": 20_000, "count": SOLID}}
+    [text] = format_market_digest("EU", current, None, None, DIGEST_NOW, DIGEST_CATALOG)
+    assert "*" not in text

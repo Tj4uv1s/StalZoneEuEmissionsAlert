@@ -31,6 +31,9 @@ def fast_config(monkeypatch):
         min_poll_interval=1.0,
         announce_max_age=900.0,
         top_lots_delay=1800.0,
+        # 23:00 Києва — позаду часу всіх тестів топу лотів (NOW ~13:00 Києва),
+        # щоб дайджест ринку в них не спрацьовував і не ліз в незамоканий API
+        market_digest_hour=23,
     )
     monkeypatch.setattr(main, "config", test_config)
     return test_config
@@ -187,3 +190,125 @@ async def test_broken_pending_state_is_dropped_without_crash(fast_config, storag
 
     assert notifier.sent == []
     assert "pending_top_lots" not in storage.get("EU")
+
+
+# --- дайджест ринку ------------------------------------------------------
+
+from app.auction import MarketFetch  # noqa: E402
+
+DIGEST_TIME = datetime(2026, 9, 28, 9, 30, 0, tzinfo=timezone.utc)  # 12:30 Києва
+
+
+@pytest.fixture
+def digest_config(monkeypatch):
+    test_config = dataclasses.replace(
+        main.config, regions=["EU"], min_poll_interval=1.0, market_digest_hour=12
+    )
+    monkeypatch.setattr(main, "config", test_config)
+    return test_config
+
+
+def _lots(*prices, qlt=3):
+    return [{"buyoutPrice": p, "amount": 1, "additional": {"qlt": qlt}} for p in prices]
+
+
+async def _poll(storage, notifier, now):
+    with respx.mock:
+        respx.get("https://api.test/EU/emission").mock(
+            return_value=httpx.Response(200, json={"currentStart": None})
+        )
+        async with StalcraftClient("https://api.test", "1", "s") as api:
+            await main.poll_once(api, storage, notifier, now=now)
+
+
+@pytest.mark.asyncio
+async def test_first_digest_saves_snapshot_and_sends_price_list(
+    digest_config, storage, monkeypatch
+):
+    async def fake_fetch(api, region, **kw):
+        return MarketFetch(lots={"a1": _lots(100, 200, 300)}, failed=0, total=1)
+
+    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    notifier = FakeNotifier()
+    await _poll(storage, notifier, DIGEST_TIME)
+
+    market = storage.get("EU")["market"]
+    assert market == {"taken_at": "2026-09-28T09:30:00Z", "prices": {"a1:3": {"median": 200, "count": 3}}}
+    assert len(notifier.sent) == 1
+    assert "Перший зріз цін" in notifier.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_second_day_compares_with_previous_snapshot(digest_config, storage, monkeypatch):
+    storage.set(
+        "EU",
+        {"market": {"taken_at": "2026-09-27T09:30:00Z", "prices": {"a1:3": {"median": 100, "count": 10}}}},
+    )
+
+    async def fake_fetch(api, region, **kw):
+        return MarketFetch(lots={"a1": _lots(*[150] * 10)}, failed=0, total=1)
+
+    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    notifier = FakeNotifier()
+    await _poll(storage, notifier, DIGEST_TIME)
+
+    assert "🟢▲ +50,0%" in notifier.sent[0]
+    assert storage.get("EU")["market"]["prices"]["a1:3"]["median"] == 150
+
+
+@pytest.mark.asyncio
+async def test_digest_runs_once_per_day(digest_config, storage, monkeypatch):
+    calls = []
+
+    async def fake_fetch(api, region, **kw):
+        calls.append(1)
+        return MarketFetch(lots={"a1": _lots(100)}, failed=0, total=1)
+
+    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    notifier = FakeNotifier()
+    await _poll(storage, notifier, DIGEST_TIME)
+    await _poll(storage, notifier, datetime(2026, 9, 28, 18, 0, tzinfo=timezone.utc))
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_mostly_failed_fetch_keeps_yesterday_and_schedules_retry(
+    digest_config, storage, monkeypatch
+):
+    yesterday = {"taken_at": "2026-09-27T09:30:00Z", "prices": {"a1:3": {"median": 100, "count": 3}}}
+    storage.set("EU", {"market": yesterday})
+
+    async def fake_fetch(api, region, **kw):
+        return MarketFetch(lots={}, failed=80, total=103)
+
+    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    notifier = FakeNotifier()
+    await _poll(storage, notifier, DIGEST_TIME)
+
+    state = storage.get("EU")
+    assert state["market"] == yesterday  # учорашні ціни не стерті
+    assert state["market_retry_at"] == "2026-09-28T09:45:00Z"
+    assert notifier.sent == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_outage_does_not_trigger_refetch_storm(digest_config, storage, monkeypatch):
+    """Обрив мережі до Telegram не має змушувати обходити весь ринок щоопитування."""
+    calls = []
+
+    async def fake_fetch(api, region, **kw):
+        calls.append(1)
+        return MarketFetch(lots={"a1": _lots(100)}, failed=0, total=1)
+
+    class BrokenNotifier(FakeNotifier):
+        async def broadcast(self, text):
+            raise httpx.ConnectError("telegram недоступний")
+
+    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    notifier = BrokenNotifier()
+    await _poll(storage, notifier, DIGEST_TIME)
+    await _poll(storage, notifier, DIGEST_TIME)
+
+    assert len(calls) == 1
+    assert "market" in storage.get("EU")

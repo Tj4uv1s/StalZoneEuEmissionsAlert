@@ -231,3 +231,51 @@ async def test_concurrency_is_bounded():
         await _run(catalog=catalog, concurrency=3)
 
     assert peak == 3
+
+
+# --- fetch_market -----------------------------------------------------------
+
+from app.auction import fetch_market  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_takes_all_lots_regardless_of_age():
+    """Для зрізу ринку потрібні всі активні лоти, а не тільки свіжі."""
+    with respx.mock:
+        respx.get(GRAV_URL).mock(
+            return_value=_page(_lot("2026-09-26T10:00:00Z", 1), _lot("2020-01-01T00:00:00Z", 2))
+        )
+        async with StalcraftClient("https://api.test", "1", "s") as api:
+            fetched = await fetch_market(api, "EU", catalog=(GRAVITY,))
+
+    assert [lot["buyoutPrice"] for lot in fetched.lots["grav1"]] == [1, 2]
+    assert (fetched.failed, fetched.total) == (0, 1)
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_pages_through_everything():
+    with respx.mock:
+        route = respx.get(GRAV_URL).mock(
+            side_effect=[
+                _page(_lot("2026-09-26T10:00:00Z", 1), _lot("2020-01-01T00:00:00Z", 2)),
+                _page(_lot("2019-01-01T00:00:00Z", 3)),
+            ]
+        )
+        async with StalcraftClient("https://api.test", "1", "s") as api:
+            fetched = await fetch_market(api, "EU", catalog=(GRAVITY,), page_size=2)
+
+    assert route.call_count == 2
+    assert len(fetched.lots["grav1"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_counts_failures_and_keeps_empty_markets():
+    with respx.mock:
+        respx.get(GRAV_URL).mock(return_value=httpx.Response(500))
+        respx.get(THERM_URL).mock(return_value=_page())
+        async with StalcraftClient("https://api.test", "1", "s") as api:
+            fetched = await fetch_market(api, "EU", catalog=(GRAVITY, THERMAL))
+
+    # порожній ринок ≠ невдалий запит: therm1 є з порожнім списком, grav1 — ні
+    assert fetched.lots == {"therm1": []}
+    assert (fetched.failed, fetched.total) == (1, 2)

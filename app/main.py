@@ -11,17 +11,28 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from app.auction import top_listings_between
+import httpx
+
+from app.auction import fetch_market, top_listings_between
 from app.config import config
-from app.constants import RATE_LIMIT_SAFETY_MARGIN
-from app.notify import Notifier, format_event, format_top_listings
+from app.constants import (
+    LOCAL_TZ_LABEL,
+    LOCAL_TZ_NAME,
+    MARKET_RETRY_DELAY,
+    RATE_LIMIT_SAFETY_MARGIN,
+)
+from app.market import build_snapshot, digest_due
+from app.notify import Notifier, format_event, format_market_digest, format_top_listings
 from app.stalcraft import RateLimit, StalcraftClient
 from app.single_instance import AlreadyRunning, SingleInstance
 from app.storage import JsonStorage
 from app.tracker import ENDED, diff, parse_iso, to_iso
 
 log = logging.getLogger(__name__)
+
+_LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 
 
 def _next_delay(rate: RateLimit, floor: float) -> float:
@@ -49,6 +60,27 @@ def _next_delay(rate: RateLimit, floor: float) -> float:
     if rate.remaining <= 0:
         return max(floor, window_left)
     return max(floor, window_left / rate.remaining)
+
+
+async def _send_once(
+    region: str, notifier: Notifier, messages: list[str], what: str
+) -> None:
+    """Розіслати результат важкого збору рівно один раз, без повторів.
+
+    Збір топу чи дайджесту — це обхід усього каталогу (~100 запитів, ~20 с).
+    Якби мережева помилка Telegram вилітала звідси, poll_once не зберіг би
+    стан, і вже за 2 с бот знову обходив би весь ринок — і так по колу, поки
+    Telegram лежить. Тому викликач спершу фіксує стан, а збій відправки тут
+    тільки логується: краще втратити один дайджест, ніж влаштувати шторм
+    запитів до API гри. (Сповіщення про викид так НЕ роблять: там повтор
+    відправки на наступному опитуванні — бажана поведінка.)
+    """
+    try:
+        for text in messages:
+            log.info("%s: %s -> %r", region, what, text)
+            await notifier.broadcast(text)
+    except httpx.HTTPError:
+        log.exception("%s: не вдалося розіслати %s — повторювати не будемо", region, what)
 
 
 async def _handle_top_listings(
@@ -85,12 +117,62 @@ async def _handle_top_listings(
 
     listings = await top_listings_between(api, region, since, due)
     text = format_top_listings(region, listings, since, due)
+    state.pop("pending_top_lots", None)  # спершу знімаємо задачу, потім шлемо — див. _send_once
     if text:
-        log.info("%s: топ лотів -> %r", region, text)
-        await notifier.broadcast(text)
+        await _send_once(region, notifier, [text], "топ лотів")
     else:
         log.info("%s: після викиду артефактів на аукціон не виставляли — мовчимо", region)
-    state.pop("pending_top_lots", None)
+
+
+async def _handle_market_digest(
+    region: str, state: dict, notifier: Notifier, api: StalcraftClient, now: datetime
+) -> None:
+    """Раз на добу — зріз цін ринку, порівняння з учорашнім і розсилка дайджесту.
+
+    Мутує `state` на місці: кладе новий зріз у "market" (старий замінюється —
+    для порівняння потрібен лише попередній день).
+
+    Якщо обхід ринку здебільшого впав (мережа, API лежить), зріз НЕ
+    зберігаємо: він був би майже порожнім і "стер" би вчорашні ціни, а
+    завтрашнє порівняння вийшло б ні з чим. Замість цього — нова спроба
+    через MARKET_RETRY_DELAY, а не на кожному опитуванні.
+
+    Args:
+        region: Код регіону
+        state: Стан регіону (той самий dict, що піде в storage.set)
+        notifier: Відправник повідомлень
+        api: Клієнт API
+        now: Поточний час
+    """
+    market = state.get("market") or {}
+    if not digest_due(
+        market.get("taken_at"),
+        now,
+        config.market_digest_hour,
+        _LOCAL_TZ,
+        state.get("market_retry_at"),
+    ):
+        return
+
+    fetched = await fetch_market(api, region)
+    if fetched.failed * 2 > fetched.total:
+        log.warning(
+            "%s: обхід ринку впав для %s з %s артефактів — зріз не зберігаю, спробую пізніше",
+            region,
+            fetched.failed,
+            fetched.total,
+        )
+        state["market_retry_at"] = to_iso(now + timedelta(seconds=MARKET_RETRY_DELAY))
+        return
+
+    current = build_snapshot(fetched.lots)
+    messages = format_market_digest(
+        region, current, market.get("prices"), market.get("taken_at"), now
+    )
+    # Спершу зберігаємо зріз, потім шлемо — див. _send_once
+    state["market"] = {"taken_at": to_iso(now), "prices": current}
+    state.pop("market_retry_at", None)
+    await _send_once(region, notifier, messages, "дайджест ринку")
 
 
 async def poll_once(
@@ -131,6 +213,7 @@ async def poll_once(
                     new_state["pending_top_lots"] = {"since": event.at, "due": to_iso(due)}
 
             await _handle_top_listings(region, new_state, notifier, api, now)
+            await _handle_market_digest(region, new_state, notifier, api, now)
 
             if new_state != state:
                 storage.set(region, new_state)
@@ -160,11 +243,14 @@ async def _run() -> None:
     ) as api:
         log.info(
             "Старт. Регіони: %s; пол інтервалу: %ss; анонсуємо події не старше %s хв; "
-            "топ лотів аукціону через %s хв після викиду; API: %s",
+            "топ лотів аукціону через %s хв після викиду; дайджест ринку щодня з %s:00 %s; "
+            "API: %s",
             ", ".join(config.regions),
             config.min_poll_interval,
             int(config.announce_max_age // 60),
             int(config.top_lots_delay // 60),
+            config.market_digest_hour,
+            LOCAL_TZ_LABEL,
             config.api_base,
         )
         try:
