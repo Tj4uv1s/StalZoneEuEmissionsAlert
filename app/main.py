@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.auction import fetch_market, top_listings_between
 from app.config import config
 from app.constants import (
     LOCAL_TZ_LABEL,
@@ -23,8 +22,9 @@ from app.constants import (
     MARKET_RETRY_DELAY,
     RATE_LIMIT_SAFETY_MARGIN,
 )
-from app.market import build_snapshot, digest_due
-from app.notify import Notifier, format_event, format_market_digest, format_top_listings
+from app.market import digest_due
+from app.notify import Notifier, format_event
+from app.reports import MarketUnavailable, build_digest, build_top_report
 from app.stalcraft import RateLimit, StalcraftClient
 from app.single_instance import AlreadyRunning, SingleInstance
 from app.storage import JsonStorage
@@ -115,8 +115,7 @@ async def _handle_top_listings(
     if now < due:
         return
 
-    listings = await top_listings_between(api, region, since, due)
-    text = format_top_listings(region, listings, since, due)
+    text = await build_top_report(api, region, since, due)
     state.pop("pending_top_lots", None)  # спершу знімаємо задачу, потім шлемо — див. _send_once
     if text:
         await _send_once(region, notifier, [text], "топ лотів")
@@ -154,25 +153,17 @@ async def _handle_market_digest(
     ):
         return
 
-    fetched = await fetch_market(api, region)
-    if fetched.failed * 2 > fetched.total:
-        log.warning(
-            "%s: обхід ринку впав для %s з %s артефактів — зріз не зберігаю, спробую пізніше",
-            region,
-            fetched.failed,
-            fetched.total,
-        )
+    try:
+        digest = await build_digest(api, region, market, now)
+    except MarketUnavailable as exc:
+        log.warning("%s — зріз не зберігаю, спробую пізніше", exc)
         state["market_retry_at"] = to_iso(now + timedelta(seconds=MARKET_RETRY_DELAY))
         return
 
-    current = build_snapshot(fetched.lots)
-    messages = format_market_digest(
-        region, current, market.get("prices"), market.get("taken_at"), now
-    )
     # Спершу зберігаємо зріз, потім шлемо — див. _send_once
-    state["market"] = {"taken_at": to_iso(now), "prices": current}
+    state["market"] = {"taken_at": to_iso(now), "prices": digest.snapshot}
     state.pop("market_retry_at", None)
-    await _send_once(region, notifier, messages, "дайджест ринку")
+    await _send_once(region, notifier, digest.messages, "дайджест ринку")
 
 
 async def poll_once(

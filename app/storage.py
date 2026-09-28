@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
@@ -47,6 +48,9 @@ class JsonStorage:
         """
         self._data[region] = state
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        # Атомарно: пишемо в тимчасовий файл і підміняємо. Інакше ручна
+        # команда (app.cli), що читає стан поруч із ботом, могла б прочитати
+        # напівзаписаний JSON, а падіння бота посеред запису зіпсувало б стан.
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self._path)

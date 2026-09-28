@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from app import main
+from app import main, reports
 from app.storage import JsonStorage
 from app.stalcraft import StalcraftClient
 from app.tracker import parse_iso
@@ -123,8 +123,8 @@ async def test_top_lots_fetched_and_broadcast_when_due(fast_config, storage, mon
         windows.append((since, until))
         return ["не важливо, format_top_listings теж підмінимо"]
 
-    monkeypatch.setattr(main, "top_listings_between", fake_top_listings_between)
-    monkeypatch.setattr(main, "format_top_listings", lambda *a, **kw: "📦 топ лотів")
+    monkeypatch.setattr(reports, "top_listings_between", fake_top_listings_between)
+    monkeypatch.setattr(reports, "format_top_listings", lambda *a, **kw: "📦 топ лотів")
 
     # Перевіряємо із запізненням на 5 хв (пауза опитування, рестарт) —
     # вікно все одно має закінчуватись рівно на due, а не розповзатись до now.
@@ -161,7 +161,7 @@ async def test_empty_listings_result_sends_nothing_but_clears_pending(
     async def fake_top_listings_between(*a, **kw):
         return []
 
-    monkeypatch.setattr(main, "top_listings_between", fake_top_listings_between)
+    monkeypatch.setattr(reports, "top_listings_between", fake_top_listings_between)
     # format_top_listings([]) реально повертає None — не підміняємо, перевіряємо як є
 
     with respx.mock:
@@ -228,7 +228,7 @@ async def test_first_digest_saves_snapshot_and_sends_price_list(
     async def fake_fetch(api, region, **kw):
         return MarketFetch(lots={"a1": _lots(100, 200, 300)}, failed=0, total=1)
 
-    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     notifier = FakeNotifier()
     await _poll(storage, notifier, DIGEST_TIME)
 
@@ -248,7 +248,7 @@ async def test_second_day_compares_with_previous_snapshot(digest_config, storage
     async def fake_fetch(api, region, **kw):
         return MarketFetch(lots={"a1": _lots(*[150] * 10)}, failed=0, total=1)
 
-    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     notifier = FakeNotifier()
     await _poll(storage, notifier, DIGEST_TIME)
 
@@ -264,7 +264,7 @@ async def test_digest_runs_once_per_day(digest_config, storage, monkeypatch):
         calls.append(1)
         return MarketFetch(lots={"a1": _lots(100)}, failed=0, total=1)
 
-    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     notifier = FakeNotifier()
     await _poll(storage, notifier, DIGEST_TIME)
     await _poll(storage, notifier, datetime(2026, 9, 28, 18, 0, tzinfo=timezone.utc))
@@ -282,7 +282,7 @@ async def test_mostly_failed_fetch_keeps_yesterday_and_schedules_retry(
     async def fake_fetch(api, region, **kw):
         return MarketFetch(lots={}, failed=80, total=103)
 
-    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     notifier = FakeNotifier()
     await _poll(storage, notifier, DIGEST_TIME)
 
@@ -305,7 +305,7 @@ async def test_telegram_outage_does_not_trigger_refetch_storm(digest_config, sto
         async def broadcast(self, text):
             raise httpx.ConnectError("telegram недоступний")
 
-    monkeypatch.setattr(main, "fetch_market", fake_fetch)
+    monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     notifier = BrokenNotifier()
     await _poll(storage, notifier, DIGEST_TIME)
     await _poll(storage, notifier, DIGEST_TIME)
