@@ -251,3 +251,39 @@ def test_retry_at_postpones_attempt():
 def test_broken_last_timestamp_is_treated_as_no_snapshot():
     assert digest_due("не час", utc(2026, 9, 28, 10, 0), 12, KYIV) is True
 
+
+
+# --- вікно звичної ціни -------------------------------------------------------
+
+from app.market import baseline_window  # noqa: E402
+
+
+def _days(*stamps):
+    return [{"taken_at": s, "prices": {}} for s in stamps]
+
+
+def test_baseline_window_excludes_today_snapshot():
+    """Ручний дайджест о 22:00 не має підмішувати сьогоднішній зріз з 20:00 у "звичне"."""
+    history = _days("2026-09-28T17:00:00Z", "2026-09-29T17:00:00Z")  # 20:00 Києва
+    now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)  # 22:00 Києва, 29.09
+    assert [d["taken_at"] for d in baseline_window(history, now, KYIV, 7)] == ["2026-09-28T17:00:00Z"]
+
+
+def test_baseline_window_before_todays_digest_keeps_yesterday():
+    history = _days("2026-09-28T17:00:00Z")
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)  # 15:00 Києва, до планового
+    assert len(baseline_window(history, now, KYIV, 7)) == 1
+
+
+def test_baseline_window_uses_kyiv_day_not_utc():
+    # 22:30 UTC 28.09 = 01:30 Києва 29.09 — це вже "сьогодні" для запуску 29.09
+    history = _days("2026-09-28T22:30:00Z")
+    now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
+    assert baseline_window(history, now, KYIV, 7) == []
+
+
+def test_baseline_window_takes_last_n_days():
+    history = _days(*[f"2026-09-{d:02d}T17:00:00Z" for d in range(10, 25)])
+    now = datetime(2026, 9, 29, 17, 0, tzinfo=timezone.utc)
+    window = baseline_window(history, now, KYIV, 7)
+    assert [d["taken_at"][:10] for d in window] == [f"2026-09-{d}" for d in range(18, 25)]

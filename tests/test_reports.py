@@ -77,3 +77,24 @@ async def test_build_digest_tolerates_minority_of_failures(monkeypatch):
     monkeypatch.setattr(reports, "fetch_market", fake_fetch)
     digest = await build_digest(None, "EU", [], NOW)
     assert digest.snapshot
+
+
+@pytest.mark.asyncio
+async def test_manual_digest_before_and_after_scheduled_uses_same_baseline(monkeypatch):
+    """Ручний запуск о 15:00 і о 22:00 порівнює з тими самими днями, що й плановий о 20:00."""
+    from app.reports import build_digest as build
+
+    async def fake_fetch(api, region, **kw):
+        return MarketFetch(lots={"a1": _lots(*[100] * 10)}, failed=0, total=1)
+
+    monkeypatch.setattr(reports, "fetch_market", fake_fetch)
+    yesterday = {"taken_at": "2026-09-27T17:00:00Z", "prices": {"a1:2": {"median": 200, "count": 10}}}
+    today = {"taken_at": "2026-09-28T17:00:00Z", "prices": {"a1:2": {"median": 100, "count": 10}}}
+
+    before = await build(None, "EU", [yesterday], datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc))
+    after = await build(None, "EU", [yesterday, today], datetime(2026, 9, 28, 19, 0, tzinfo=timezone.utc))
+
+    # в обох випадках база — тільки вчорашні 200, тож сигнал однаковий: −50%
+    assert "−50%" in before.text
+    assert "−50%" in after.text
+    assert "середня за 1 дн." in after.text

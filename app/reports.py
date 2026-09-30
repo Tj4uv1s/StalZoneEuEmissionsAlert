@@ -11,7 +11,8 @@ from typing import Optional
 
 from app.auction import fetch_market, top_listings_between
 from app.constants import MARKET_BASELINE_DAYS
-from app.market import build_snapshot
+from app.formatting import LOCAL_TZ
+from app.market import baseline_window, build_snapshot
 from app.notify import format_market_digest, format_top_listings
 from app.stalcraft import StalcraftClient
 from app.tracker import parse_iso
@@ -57,8 +58,8 @@ async def build_digest(
             f"{region}: не вдалося отримати лоти {fetched.failed} з {fetched.total} артефактів"
         )
     snapshot = build_snapshot(fetched.lots)
-    baseline_window = history[-MARKET_BASELINE_DAYS:]
-    return Digest(format_market_digest(region, snapshot, baseline_window, now), snapshot)
+    base = baseline_window(history, now, LOCAL_TZ, MARKET_BASELINE_DAYS)
+    return Digest(format_market_digest(region, snapshot, base, now), snapshot)
 
 
 async def last_emission_window(

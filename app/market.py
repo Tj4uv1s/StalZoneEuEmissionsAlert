@@ -132,6 +132,23 @@ def add_to_history(
     return [*history, {"taken_at": taken_at, "prices": snapshot}][-keep:]
 
 
+def baseline_window(
+    history: list[dict], now: datetime, tz: tzinfo, days: int
+) -> list[dict]:
+    """Зрізи, з яких рахувати звичну ціну: останні `days` місцевих днів ДО сьогодні.
+
+    Сьогоднішній зріз (якщо вже знятий) у базу не йде: інакше ручний дайджест
+    після планового змішував би "сьогодні" зі "звичним" і давав інші сигнали,
+    ніж плановий і меню бота. З цим правилом ручний запуск у будь-яку годину
+    порівнює з тією самою базою, що й плановий о 20:00.
+    """
+    today = now.astimezone(tz).date()
+    earlier = [
+        day for day in history if parse_iso(day["taken_at"]).astimezone(tz).date() < today
+    ]
+    return earlier[-days:]
+
+
 def baseline(history: list[dict], key: str, min_count: int) -> Optional[tuple[int, int]]:
     """Звична ціна пари: середнє її денних медіан у `history`.
 
